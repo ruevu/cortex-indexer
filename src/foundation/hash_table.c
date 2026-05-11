@@ -54,14 +54,14 @@ static uint32_t next_pow2(uint32_t v) {
     return v + SKIP_ONE;
 }
 
-CBMHashTable *cbm_ht_create(uint32_t initial_capacity) {
-    CBMHashTable *ht = (CBMHashTable *)calloc(CBM_ALLOC_ONE, sizeof(CBMHashTable));
+CtxHashTable *ctx_ht_create(uint32_t initial_capacity) {
+    CtxHashTable *ht = (CtxHashTable *)calloc(CTX_ALLOC_ONE, sizeof(CtxHashTable));
     if (!ht) {
         return NULL;
     }
     ht->capacity = next_pow2(initial_capacity);
     ht->mask = ht->capacity - SKIP_ONE;
-    ht->entries = (CBMHTEntry *)calloc(ht->capacity, sizeof(CBMHTEntry));
+    ht->entries = (CtxHTEntry *)calloc(ht->capacity, sizeof(CtxHTEntry));
     if (!ht->entries) {
         free(ht);
         return NULL;
@@ -69,7 +69,7 @@ CBMHashTable *cbm_ht_create(uint32_t initial_capacity) {
     return ht;
 }
 
-void cbm_ht_free(CBMHashTable *ht) {
+void ctx_ht_free(CtxHashTable *ht) {
     if (!ht) {
         return;
     }
@@ -77,32 +77,32 @@ void cbm_ht_free(CBMHashTable *ht) {
     free(ht);
 }
 
-static void ht_resize(CBMHashTable *ht) {
+static void ht_resize(CtxHashTable *ht) {
     uint32_t new_cap = ht->capacity * PAIR_LEN;
     uint32_t new_mask = new_cap - SKIP_ONE;
-    CBMHTEntry *new_entries = (CBMHTEntry *)calloc(new_cap, sizeof(CBMHTEntry));
+    CtxHTEntry *new_entries = (CtxHTEntry *)calloc(new_cap, sizeof(CtxHTEntry));
     if (!new_entries) {
         return; /* OOM: keep old table */
     }
 
     for (uint32_t i = 0; i < ht->capacity; i++) {
-        const CBMHTEntry *e = &ht->entries[i];
+        const CtxHTEntry *e = &ht->entries[i];
         if (e->psl == 0) {
             continue; /* empty slot */
         }
 
         /* Re-insert into new table */
         uint32_t idx = e->hash & new_mask;
-        CBMHTEntry cur = {.key = e->key, .value = e->value, .hash = e->hash, .psl = HT_INITIAL_PSL};
+        CtxHTEntry cur = {.key = e->key, .value = e->value, .hash = e->hash, .psl = HT_INITIAL_PSL};
         for (;;) {
-            CBMHTEntry *slot = &new_entries[idx];
+            CtxHTEntry *slot = &new_entries[idx];
             if (slot->psl == 0) {
                 *slot = cur;
                 break;
             }
             /* Robin Hood: steal from rich (shorter probe) */
             if (cur.psl > slot->psl) {
-                CBMHTEntry tmp = *slot;
+                CtxHTEntry tmp = *slot;
                 *slot = cur;
                 cur = tmp;
             }
@@ -117,7 +117,7 @@ static void ht_resize(CBMHashTable *ht) {
     ht->mask = new_mask;
 }
 
-void *cbm_ht_set(CBMHashTable *ht, const char *key, void *value) {
+void *ctx_ht_set(CtxHashTable *ht, const char *key, void *value) {
     /* Resize at 75% load */
     if (ht->count * HT_LOAD_DEN >= ht->capacity * HT_LOAD_NUM) {
         ht_resize(ht);
@@ -125,11 +125,11 @@ void *cbm_ht_set(CBMHashTable *ht, const char *key, void *value) {
 
     uint32_t h = fnv1a(key);
     uint32_t idx = h & ht->mask;
-    CBMHTEntry cur = {.key = key, .value = value, .hash = h, .psl = HT_INITIAL_PSL};
+    CtxHTEntry cur = {.key = key, .value = value, .hash = h, .psl = HT_INITIAL_PSL};
     void *prev_value = NULL;
 
     for (;;) {
-        CBMHTEntry *slot = &ht->entries[idx];
+        CtxHTEntry *slot = &ht->entries[idx];
 
         if (slot->psl == 0) {
             /* Empty slot — insert here */
@@ -148,7 +148,7 @@ void *cbm_ht_set(CBMHashTable *ht, const char *key, void *value) {
 
         /* Robin Hood: steal from rich */
         if (cur.psl > slot->psl) {
-            CBMHTEntry tmp = *slot;
+            CtxHTEntry tmp = *slot;
             *slot = cur;
             cur = tmp;
         }
@@ -158,13 +158,13 @@ void *cbm_ht_set(CBMHashTable *ht, const char *key, void *value) {
     }
 }
 
-void *cbm_ht_get(const CBMHashTable *ht, const char *key) {
+void *ctx_ht_get(const CtxHashTable *ht, const char *key) {
     uint32_t h = fnv1a(key);
     uint32_t idx = h & ht->mask;
     uint32_t psl = SKIP_ONE;
 
     for (;;) {
-        const CBMHTEntry *slot = &ht->entries[idx];
+        const CtxHTEntry *slot = &ht->entries[idx];
         if (slot->psl == 0) {
             return NULL; /* empty — not found */
         }
@@ -179,11 +179,11 @@ void *cbm_ht_get(const CBMHashTable *ht, const char *key) {
     }
 }
 
-bool cbm_ht_has(const CBMHashTable *ht, const char *key) {
-    return cbm_ht_get(ht, key) != NULL;
+bool ctx_ht_has(const CtxHashTable *ht, const char *key) {
+    return ctx_ht_get(ht, key) != NULL;
 }
 
-const char *cbm_ht_get_key(const CBMHashTable *ht, const char *key) {
+const char *ctx_ht_get_key(const CtxHashTable *ht, const char *key) {
     if (!ht || !key) {
         return NULL;
     }
@@ -191,7 +191,7 @@ const char *cbm_ht_get_key(const CBMHashTable *ht, const char *key) {
     uint32_t idx = h & ht->mask;
     uint32_t psl = SKIP_ONE;
     for (;;) {
-        const CBMHTEntry *slot = &ht->entries[idx];
+        const CtxHTEntry *slot = &ht->entries[idx];
         if (slot->psl == 0) {
             return NULL;
         }
@@ -206,14 +206,14 @@ const char *cbm_ht_get_key(const CBMHashTable *ht, const char *key) {
     }
 }
 
-void *cbm_ht_delete(CBMHashTable *ht, const char *key) {
+void *ctx_ht_delete(CtxHashTable *ht, const char *key) {
     uint32_t h = fnv1a(key);
     uint32_t idx = h & ht->mask;
     uint32_t psl = SKIP_ONE;
 
     /* Find the entry */
     for (;;) {
-        CBMHTEntry *slot = &ht->entries[idx];
+        CtxHTEntry *slot = &ht->entries[idx];
         if (slot->psl == 0) {
             return NULL;
         }
@@ -227,10 +227,10 @@ void *cbm_ht_delete(CBMHashTable *ht, const char *key) {
             /* Backward shift: fill the hole */
             for (;;) {
                 uint32_t next_idx = (idx + SKIP_ONE) & ht->mask;
-                const CBMHTEntry *next = &ht->entries[next_idx];
+                const CtxHTEntry *next = &ht->entries[next_idx];
                 if (next->psl <= HT_INITIAL_PSL) {
                     /* Next slot is empty or at home — stop */
-                    ht->entries[idx] = (CBMHTEntry){0};
+                    ht->entries[idx] = (CtxHTEntry){0};
                     break;
                 }
                 /* Shift next entry back */
@@ -245,11 +245,11 @@ void *cbm_ht_delete(CBMHashTable *ht, const char *key) {
     }
 }
 
-uint32_t cbm_ht_count(const CBMHashTable *ht) {
+uint32_t ctx_ht_count(const CtxHashTable *ht) {
     return ht ? ht->count : 0;
 }
 
-void cbm_ht_foreach(const CBMHashTable *ht, cbm_ht_iter_fn fn, void *userdata) {
+void ctx_ht_foreach(const CtxHashTable *ht, ctx_ht_iter_fn fn, void *userdata) {
     if (!ht || !fn) {
         return;
     }
@@ -260,10 +260,10 @@ void cbm_ht_foreach(const CBMHashTable *ht, cbm_ht_iter_fn fn, void *userdata) {
     }
 }
 
-void cbm_ht_clear(CBMHashTable *ht) {
+void ctx_ht_clear(CtxHashTable *ht) {
     if (!ht) {
         return;
     }
-    memset(ht->entries, 0, ht->capacity * sizeof(CBMHTEntry));
+    memset(ht->entries, 0, ht->capacity * sizeof(CtxHTEntry));
     ht->count = 0;
 }

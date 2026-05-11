@@ -4,7 +4,7 @@
 // functions, imports, calls, and composable usage. Walks <template> elements
 // to detect component references (CALLS) and directive attributes (usages/calls).
 // Follows the extract_k8s.c pattern: domain-specific extractor called from
-// cbm_extract_file().
+// ctx_extract_file().
 
 #include "extract_sfc.h"
 #include "arena.h"
@@ -88,7 +88,7 @@ static bool is_js_literal(const char *s, int len) {
 // Leading identifier extraction
 // ---------------------------------------------------------------------------
 
-static const char *extract_leading_ident(CBMArena *a, const char *expr, int len) {
+static const char *extract_leading_ident(CtxArena *a, const char *expr, int len) {
     int start = 0;
     while (start < len && (expr[start] == ' ' || expr[start] == '\t' ||
                            expr[start] == '\n' || expr[start] == '\r')) {
@@ -115,11 +115,11 @@ static const char *extract_leading_ident(CBMArena *a, const char *expr, int len)
     if (is_js_literal(expr + start, ident_len)) {
         return NULL;
     }
-    return cbm_arena_strndup(a, expr + start, (size_t)ident_len);
+    return ctx_arena_strndup(a, expr + start, (size_t)ident_len);
 }
 
 // Extract collection identifier from v-for: "item in items" -> "items"
-static const char *extract_vfor_collection(CBMArena *a, const char *expr, int len) {
+static const char *extract_vfor_collection(CtxArena *a, const char *expr, int len) {
     for (int i = 0; i < len - 3; i++) {
         bool is_in = (i + 4 <= len && expr[i] == ' ' &&
                       expr[i + 1] == 'i' && expr[i + 2] == 'n' && expr[i + 3] == ' ');
@@ -136,14 +136,14 @@ static const char *extract_vfor_collection(CBMArena *a, const char *expr, int le
 // Forward declarations
 // ---------------------------------------------------------------------------
 
-static void sfc_extract_scripts(CBMExtractCtx *ctx, TSNode root);
-static void sfc_extract_template(CBMExtractCtx *ctx, TSNode root);
+static void sfc_extract_scripts(CtxExtractCtx *ctx, TSNode root);
+static void sfc_extract_template(CtxExtractCtx *ctx, TSNode root);
 
 // ---------------------------------------------------------------------------
 // Public entry point
 // ---------------------------------------------------------------------------
 
-void cbm_extract_sfc(CBMExtractCtx *ctx) {
+void ctx_extract_sfc(CtxExtractCtx *ctx) {
     TSNode root = ctx->root;
     sfc_extract_scripts(ctx, root);
     sfc_extract_template(ctx, root);
@@ -187,16 +187,16 @@ static bool script_has_lang_ts(TSNode start_tag, const char *source) {
     return false;
 }
 
-static void adjust_def_line_offsets(CBMFileResult *result, int defs_before, uint32_t offset) {
+static void adjust_def_line_offsets(CtxFileResult *result, int defs_before, uint32_t offset) {
     for (int i = defs_before; i < result->defs.count; i++) {
         result->defs.items[i].start_line += offset;
         result->defs.items[i].end_line += offset;
     }
 }
 
-static void sfc_extract_scripts(CBMExtractCtx *ctx, TSNode root) {
-    CBMArena *a = ctx->arena;
-    CBMFileResult *result = ctx->result;
+static void sfc_extract_scripts(CtxExtractCtx *ctx, TSNode root) {
+    CtxArena *a = ctx->arena;
+    CtxFileResult *result = ctx->result;
     uint32_t child_count = ts_node_named_child_count(root);
 
     for (uint32_t i = 0; i < child_count; i++) {
@@ -229,7 +229,7 @@ static void sfc_extract_scripts(CBMExtractCtx *ctx, TSNode root) {
             is_ts = script_has_lang_ts(start_tag, ctx->source);
         }
 
-        CBMLanguage inner_lang = is_ts ? CBM_LANG_TYPESCRIPT : CBM_LANG_JAVASCRIPT;
+        CtxLanguage inner_lang = is_ts ? CTX_LANG_TYPESCRIPT : CTX_LANG_JAVASCRIPT;
 
         uint32_t rt_start = ts_node_start_byte(raw_text);
         uint32_t rt_end = ts_node_end_byte(raw_text);
@@ -241,7 +241,7 @@ static void sfc_extract_scripts(CBMExtractCtx *ctx, TSNode root) {
             continue;
         }
 
-        TSTree *inner_tree = cbm_parse_string(script_source, script_len, inner_lang);
+        TSTree *inner_tree = ctx_parse_string(script_source, script_len, inner_lang);
         if (!inner_tree) {
             continue;
         }
@@ -250,7 +250,7 @@ static void sfc_extract_scripts(CBMExtractCtx *ctx, TSNode root) {
 
         int defs_before = result->defs.count;
 
-        CBMExtractCtx inner_ctx = {
+        CtxExtractCtx inner_ctx = {
             .arena = a,
             .result = result,
             .source = script_source,
@@ -262,9 +262,9 @@ static void sfc_extract_scripts(CBMExtractCtx *ctx, TSNode root) {
             .root = inner_root,
         };
 
-        cbm_extract_definitions(&inner_ctx);
-        cbm_extract_imports(&inner_ctx);
-        cbm_extract_unified(&inner_ctx);
+        ctx_extract_definitions(&inner_ctx);
+        ctx_extract_imports(&inner_ctx);
+        ctx_extract_unified(&inner_ctx);
 
         adjust_def_line_offsets(result, defs_before, rt_line);
 
@@ -301,7 +301,7 @@ static bool is_component_tag(const char *name, int len) {
 // Handles quoted_attribute_value, attribute_value, and expression nodes.
 // Returns val_raw pointer (into ctx->source) and sets *out_len. Returns NULL
 // if no usable value is found.
-static const char *sfc_attr_value(CBMExtractCtx *ctx, TSNode attr,
+static const char *sfc_attr_value(CtxExtractCtx *ctx, TSNode attr,
                                   int *out_len) {
     uint32_t ac = ts_node_named_child_count(attr);
     for (uint32_t j = 1; j < ac; j++) {
@@ -332,9 +332,9 @@ static const char *sfc_attr_value(CBMExtractCtx *ctx, TSNode attr,
 // Handle a Vue directive_attribute node.
 // AST children: anonymous prefix (":", "@", or directive_name "v-*"),
 //               named directive_value (argument), "=", quoted_attribute_value.
-static void sfc_handle_vue_directive(CBMExtractCtx *ctx, TSNode attr) {
-    CBMArena *a = ctx->arena;
-    CBMFileResult *result = ctx->result;
+static void sfc_handle_vue_directive(CtxExtractCtx *ctx, TSNode attr) {
+    CtxArena *a = ctx->arena;
+    CtxFileResult *result = ctx->result;
 
     // Determine directive kind from the first child (anonymous prefix token)
     TSNode first = ts_node_child(attr, 0);
@@ -357,10 +357,10 @@ static void sfc_handle_vue_directive(CBMExtractCtx *ctx, TSNode attr) {
     if (is_event) {
         const char *ident = extract_leading_ident(a, val_raw, val_len);
         if (ident) {
-            CBMCall call = {0};
+            CtxCall call = {0};
             call.callee_name = ident;
             call.enclosing_func_qn = ctx->module_qn;
-            cbm_calls_push(&result->calls, a, call);
+            ctx_calls_push(&result->calls, a, call);
         }
         return;
     }
@@ -369,10 +369,10 @@ static void sfc_handle_vue_directive(CBMExtractCtx *ctx, TSNode attr) {
     if (is_vfor) {
         const char *ident = extract_vfor_collection(a, val_raw, val_len);
         if (ident) {
-            CBMUsage usage = {0};
+            CtxUsage usage = {0};
             usage.ref_name = ident;
             usage.enclosing_func_qn = ctx->module_qn;
-            cbm_usages_push(&result->usages, a, usage);
+            ctx_usages_push(&result->usages, a, usage);
         }
         return;
     }
@@ -383,17 +383,17 @@ static void sfc_handle_vue_directive(CBMExtractCtx *ctx, TSNode attr) {
     if (is_binding) {
         const char *ident = extract_leading_ident(a, val_raw, val_len);
         if (ident) {
-            CBMUsage usage = {0};
+            CtxUsage usage = {0};
             usage.ref_name = ident;
             usage.enclosing_func_qn = ctx->module_qn;
-            cbm_usages_push(&result->usages, a, usage);
+            ctx_usages_push(&result->usages, a, usage);
         }
     }
 }
 
-static void sfc_scan_attributes(CBMExtractCtx *ctx, TSNode tag_node, bool is_vue) {
-    CBMArena *a = ctx->arena;
-    CBMFileResult *result = ctx->result;
+static void sfc_scan_attributes(CtxExtractCtx *ctx, TSNode tag_node, bool is_vue) {
+    CtxArena *a = ctx->arena;
+    CtxFileResult *result = ctx->result;
     uint32_t count = ts_node_named_child_count(tag_node);
 
     for (uint32_t i = 0; i < count; i++) {
@@ -431,10 +431,10 @@ static void sfc_scan_attributes(CBMExtractCtx *ctx, TSNode tag_node, bool is_vue
         if (is_event) {
             const char *ident = extract_leading_ident(a, val_raw, val_len);
             if (ident) {
-                CBMCall call = {0};
+                CtxCall call = {0};
                 call.callee_name = ident;
                 call.enclosing_func_qn = ctx->module_qn;
-                cbm_calls_push(&result->calls, a, call);
+                ctx_calls_push(&result->calls, a, call);
             }
             continue;
         }
@@ -444,20 +444,20 @@ static void sfc_scan_attributes(CBMExtractCtx *ctx, TSNode tag_node, bool is_vue
         if (is_bind) {
             const char *ident = extract_leading_ident(a, val_raw, val_len);
             if (ident) {
-                CBMUsage usage = {0};
+                CtxUsage usage = {0};
                 usage.ref_name = ident;
                 usage.enclosing_func_qn = ctx->module_qn;
-                cbm_usages_push(&result->usages, a, usage);
+                ctx_usages_push(&result->usages, a, usage);
             }
             continue;
         }
     }
 }
 
-static void walk_template_elements(CBMExtractCtx *ctx, TSNode node);
+static void walk_template_elements(CtxExtractCtx *ctx, TSNode node);
 
-static void check_element_tag(CBMExtractCtx *ctx, TSNode node) {
-    bool is_vue = (ctx->language == CBM_LANG_VUE);
+static void check_element_tag(CtxExtractCtx *ctx, TSNode node) {
+    bool is_vue = (ctx->language == CTX_LANG_VUE);
     uint32_t count = ts_node_named_child_count(node);
     for (uint32_t i = 0; i < count; i++) {
         TSNode child = ts_node_named_child(node, i);
@@ -477,12 +477,12 @@ static void check_element_tag(CBMExtractCtx *ctx, TSNode node) {
             const char *name_raw = ctx->source + ns;
 
             if (is_component_tag(name_raw, len)) {
-                char *name = cbm_arena_strndup(ctx->arena, name_raw, (size_t)len);
+                char *name = ctx_arena_strndup(ctx->arena, name_raw, (size_t)len);
                 if (name) {
-                    CBMCall call = {0};
+                    CtxCall call = {0};
                     call.callee_name = name;
                     call.enclosing_func_qn = ctx->module_qn;
-                    cbm_calls_push(&ctx->result->calls, ctx->arena, call);
+                    ctx_calls_push(&ctx->result->calls, ctx->arena, call);
                 }
             }
 
@@ -491,7 +491,7 @@ static void check_element_tag(CBMExtractCtx *ctx, TSNode node) {
     }
 }
 
-static void walk_template_elements(CBMExtractCtx *ctx, TSNode node) {
+static void walk_template_elements(CtxExtractCtx *ctx, TSNode node) {
     const char *type = ts_node_type(node);
 
     if (strcmp(type, "element") == 0 || strcmp(type, "self_closing_tag") == 0) {
@@ -504,8 +504,8 @@ static void walk_template_elements(CBMExtractCtx *ctx, TSNode node) {
     }
 }
 
-static void sfc_extract_template(CBMExtractCtx *ctx, TSNode root) {
-    bool is_vue = (ctx->language == CBM_LANG_VUE);
+static void sfc_extract_template(CtxExtractCtx *ctx, TSNode root) {
+    bool is_vue = (ctx->language == CTX_LANG_VUE);
 
     if (is_vue) {
         // Vue: tree-sitter-vue produces a dedicated "template_element" node

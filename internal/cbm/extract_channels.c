@@ -2,7 +2,7 @@
  * extract_channels.c — Pub/sub channel participation extractor.
  *
  * Detects Socket.IO and EventEmitter emit / on / addListener call patterns in
- * JS/TS/TSX source and records each participation as a CBMChannel record.
+ * JS/TS/TSX source and records each participation as a CtxChannel record.
  * Transport is stored on the record ("socketio", "event_emitter") so later
  * detectors for Kafka, Cloud Pub/Sub, etc. can share the same schema without
  * changing the edge types.
@@ -39,19 +39,19 @@ typedef struct {
 
 /* ── String literal helpers ──────────────────────────────────────── */
 
-static const char *unquote_string(CBMArena *a, const char *s) {
+static const char *unquote_string(CtxArena *a, const char *s) {
     if (!s) {
         return NULL;
     }
     size_t len = strlen(s);
-    if (len < CBM_QUOTE_PAIR) {
+    if (len < CTX_QUOTE_PAIR) {
         return NULL;
     }
     char first = s[0];
-    char last = s[len - CBM_QUOTE_OFFSET];
+    char last = s[len - CTX_QUOTE_OFFSET];
     if ((first == '"' && last == '"') || (first == '\'' && last == '\'') ||
         (first == '`' && last == '`')) {
-        return cbm_arena_strndup(a, s + CBM_QUOTE_OFFSET, len - CBM_QUOTE_PAIR);
+        return ctx_arena_strndup(a, s + CTX_QUOTE_OFFSET, len - CTX_QUOTE_PAIR);
     }
     return NULL;
 }
@@ -59,12 +59,12 @@ static const char *unquote_string(CBMArena *a, const char *s) {
 /* Extract a literal channel name from an argument node.  Returns NULL if the
  * argument is not a plain string literal (caller can then try identifier
  * resolution via the constant table). */
-static const char *literal_from_arg(CBMExtractCtx *ctx, TSNode arg) {
+static const char *literal_from_arg(CtxExtractCtx *ctx, TSNode arg) {
     const char *kind = ts_node_type(arg);
     if (strcmp(kind, "string") != 0 && strcmp(kind, "string_literal") != 0) {
         return NULL;
     }
-    char *text = cbm_node_text(ctx->arena, arg, ctx->source);
+    char *text = ctx_node_text(ctx->arena, arg, ctx->source);
     return unquote_string(ctx->arena, text);
 }
 
@@ -75,7 +75,7 @@ static const char *literal_from_arg(CBMExtractCtx *ctx, TSNode arg) {
  * string literals are tracked — template literals and expressions are left
  * unresolved.  This is a flat lookup; scope boundaries are ignored (a single
  * const table per file is sufficient for the common Socket.IO pattern). */
-static void scan_string_consts(CBMExtractCtx *ctx, chan_const_table_t *tbl) {
+static void scan_string_consts(CtxExtractCtx *ctx, chan_const_table_t *tbl) {
     TSNode stack[CHAN_STACK_CAP];
     int top = 0;
     stack[top++] = ctx->root;
@@ -94,8 +94,8 @@ static void scan_string_consts(CBMExtractCtx *ctx, chan_const_table_t *tbl) {
                 const char *vk = ts_node_type(value_node);
                 if (strcmp(nk, "identifier") == 0 &&
                     (strcmp(vk, "string") == 0 || strcmp(vk, "string_literal") == 0)) {
-                    char *name_text = cbm_node_text(ctx->arena, name_node, ctx->source);
-                    char *value_text = cbm_node_text(ctx->arena, value_node, ctx->source);
+                    char *name_text = ctx_node_text(ctx->arena, name_node, ctx->source);
+                    char *value_text = ctx_node_text(ctx->arena, value_node, ctx->source);
                     const char *unq = unquote_string(ctx->arena, value_text);
                     if (name_text && unq) {
                         tbl->items[tbl->count].name = name_text;
@@ -130,7 +130,7 @@ static const char *resolve_identifier(const chan_const_table_t *tbl, const char 
 
 /* Walk up the parent chain to find the nearest function-like ancestor and
  * build a best-effort qualified name for it. */
-static const char *enclosing_function_qn(CBMExtractCtx *ctx, TSNode node) {
+static const char *enclosing_function_qn(CtxExtractCtx *ctx, TSNode node) {
     TSNode parent = ts_node_parent(node);
     while (!ts_node_is_null(parent)) {
         const char *pk = ts_node_type(parent);
@@ -139,7 +139,7 @@ static const char *enclosing_function_qn(CBMExtractCtx *ctx, TSNode node) {
             strcmp(pk, "function") == 0 || strcmp(pk, "method_signature") == 0) {
             TSNode name_node = ts_node_child_by_field_name(parent, TS_FIELD("name"));
             if (!ts_node_is_null(name_node)) {
-                char *name = cbm_node_text(ctx->arena, name_node, ctx->source);
+                char *name = ctx_node_text(ctx->arena, name_node, ctx->source);
                 if (name && name[0]) {
                     return name;
                 }
@@ -167,8 +167,8 @@ static bool is_listen_method(const char *name) {
  * "event_emitter" based on a name heuristic, NULL if the receiver is unknown
  * (which means we skip — we don't want to mistake any .emit()/.on() call
  * for a channel). */
-static const char *classify_receiver(CBMExtractCtx *ctx, TSNode object_node) {
-    char *text = cbm_node_text(ctx->arena, object_node, ctx->source);
+static const char *classify_receiver(CtxExtractCtx *ctx, TSNode object_node) {
+    char *text = ctx_node_text(ctx->arena, object_node, ctx->source);
     if (!text) {
         return NULL;
     }
@@ -193,7 +193,7 @@ static const char *classify_receiver(CBMExtractCtx *ctx, TSNode object_node) {
 }
 
 /* Process a single call_expression node if it looks like a channel call. */
-static void process_channel_call(CBMExtractCtx *ctx, TSNode call,
+static void process_channel_call(CtxExtractCtx *ctx, TSNode call,
                                  const chan_const_table_t *consts) {
     /* call_expression { function: member_expression { object, property }, arguments } */
     TSNode func = ts_node_child_by_field_name(call, TS_FIELD("function"));
@@ -206,12 +206,12 @@ static void process_channel_call(CBMExtractCtx *ctx, TSNode call,
         return;
     }
 
-    char *method = cbm_node_text(ctx->arena, property, ctx->source);
-    CBMChannelDirection direction;
+    char *method = ctx_node_text(ctx->arena, property, ctx->source);
+    CtxChannelDirection direction;
     if (is_emit_method(method)) {
-        direction = CBM_CHANNEL_EMIT;
+        direction = CTX_CHANNEL_EMIT;
     } else if (is_listen_method(method)) {
-        direction = CBM_CHANNEL_LISTEN;
+        direction = CTX_CHANNEL_LISTEN;
     } else {
         return;
     }
@@ -237,7 +237,7 @@ static void process_channel_call(CBMExtractCtx *ctx, TSNode call,
         /* Try identifier resolution via the constant table. */
         const char *kind = ts_node_type(first);
         if (strcmp(kind, "identifier") == 0) {
-            char *ident = cbm_node_text(ctx->arena, first, ctx->source);
+            char *ident = ctx_node_text(ctx->arena, first, ctx->source);
             channel_name = resolve_identifier(consts, ident);
         }
     }
@@ -245,21 +245,21 @@ static void process_channel_call(CBMExtractCtx *ctx, TSNode call,
         return; /* template literal, member access, expression — skip */
     }
 
-    CBMChannel ch = {
+    CtxChannel ch = {
         .channel_name = channel_name,
         .transport = transport,
         .enclosing_func_qn = enclosing_function_qn(ctx, call),
         .direction = direction,
     };
-    cbm_channels_push(&ctx->result->channels, ctx->arena, ch);
+    ctx_channels_push(&ctx->result->channels, ctx->arena, ch);
 }
 
 /* ── Entry point ────────────────────────────────────────────────── */
 
-void cbm_extract_channels(CBMExtractCtx *ctx) {
+void ctx_extract_channels(CtxExtractCtx *ctx) {
     /* Only JS/TS variants — Socket.IO and EventEmitter are Node.js ecosystem. */
-    if (ctx->language != CBM_LANG_JAVASCRIPT && ctx->language != CBM_LANG_TYPESCRIPT &&
-        ctx->language != CBM_LANG_TSX) {
+    if (ctx->language != CTX_LANG_JAVASCRIPT && ctx->language != CTX_LANG_TYPESCRIPT &&
+        ctx->language != CTX_LANG_TSX) {
         return;
     }
 

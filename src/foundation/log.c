@@ -8,43 +8,43 @@
 #include <stdint.h>
 #include <stdio.h>
 
-static CBMLogLevel g_log_level = CBM_LOG_INFO;
-static cbm_log_sink_fn g_log_sink = NULL;
+static CtxLogLevel g_log_level = CTX_LOG_INFO;
+static ctx_log_sink_fn g_log_sink = NULL;
 
-void cbm_log_set_sink(cbm_log_sink_fn fn) {
+void ctx_log_set_sink(ctx_log_sink_fn fn) {
     g_log_sink = fn;
 }
 
-void cbm_log_set_level(CBMLogLevel level) {
+void ctx_log_set_level(CtxLogLevel level) {
     g_log_level = level;
 }
 
-CBMLogLevel cbm_log_get_level(void) {
+CtxLogLevel ctx_log_get_level(void) {
     return g_log_level;
 }
 
-static const char *level_str(CBMLogLevel level) {
+static const char *level_str(CtxLogLevel level) {
     switch (level) {
-    case CBM_LOG_DEBUG:
+    case CTX_LOG_DEBUG:
         return "debug";
-    case CBM_LOG_INFO:
+    case CTX_LOG_INFO:
         return "info";
-    case CBM_LOG_WARN:
+    case CTX_LOG_WARN:
         return "warn";
-    case CBM_LOG_ERROR:
+    case CTX_LOG_ERROR:
         return "error";
     default:
         return "unknown";
     }
 }
 
-void cbm_log(CBMLogLevel level, const char *msg, ...) {
+void ctx_log(CtxLogLevel level, const char *msg, ...) {
     if (level < g_log_level) {
         return;
     }
 
     /* Build the log line into a buffer ONCE — no double va_list iteration */
-    char line_buf[CBM_SZ_512];
+    char line_buf[CTX_SZ_512];
     int pos =
         snprintf(line_buf, sizeof(line_buf), "level=%s msg=%s", level_str(level), msg ? msg : "");
 
@@ -74,12 +74,12 @@ void cbm_log(CBMLogLevel level, const char *msg, ...) {
     }
 }
 
-void cbm_log_int(CBMLogLevel level, const char *msg, const char *key, int64_t value) {
+void ctx_log_int(CtxLogLevel level, const char *msg, const char *key, int64_t value) {
     if (level < g_log_level) {
         return;
     }
 
-    char line_buf[CBM_SZ_256];
+    char line_buf[CTX_SZ_256];
     snprintf(line_buf, sizeof(line_buf), "level=%s msg=%s %s=%" PRId64, level_str(level),
              msg ? msg : "", key ? key : "?", value);
 

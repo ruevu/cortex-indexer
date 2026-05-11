@@ -1,5 +1,5 @@
 #include "cbm.h"
-#include "arena.h" // CBMArena, cbm_arena_alloc/strdup/sprintf
+#include "arena.h" // CtxArena, ctx_arena_alloc/strdup/sprintf
 #include "helpers.h"
 #include "lang_specs.h"
 #include "foundation/constants.h"
@@ -14,7 +14,7 @@
 #define MAX_COMMENT_LEN 500
 #define MAX_BASES 16
 #define MAX_BASES_MINUS_1 15
-#define MAX_PARAMS CBM_SZ_32
+#define MAX_PARAMS CTX_SZ_32
 #define MAX_PARAMS_MINUS_1 31
 #define MAX_RETURN_TYPES 16
 #define MAX_RETURN_TYPES_MINUS_1 15
@@ -74,7 +74,7 @@ static bool try_append_ident(const char *source, uint32_t s, int len, uint32_t *
 
 /* Walk AST body, collect unique identifier text as space-separated string.
  * Returns arena-allocated string or NULL. */
-static char *extract_body_ident_tokens(CBMExtractCtx *ctx, TSNode body) {
+static char *extract_body_ident_tokens(CtxExtractCtx *ctx, TSNode body) {
     enum { BT_STACK = 512, BT_BUF = 512, BT_MAX_IDENTS = 40, BT_SEEN = 128, BT_SEEN_MASK = 127 };
     TSNode bt_stack[BT_STACK];
     int bt_top = 0;
@@ -94,7 +94,7 @@ static char *extract_body_ident_tokens(CBMExtractCtx *ctx, TSNode body) {
                 strcmp(k, "property_identifier") == 0) {
                 uint32_t s = ts_node_start_byte(nd);
                 int len = (int)(ts_node_end_byte(nd) - s);
-                if (len > 0 && len < CBM_SZ_64 && s < (uint32_t)ctx->source_len) {
+                if (len > 0 && len < CTX_SZ_64 && s < (uint32_t)ctx->source_len) {
                     try_append_ident(ctx->source, s, len, bt_seen, BT_SEEN, BT_SEEN_MASK, bt_buf,
                                      BT_BUF, &bt_pos, &bt_count);
                 }
@@ -107,7 +107,7 @@ static char *extract_body_ident_tokens(CBMExtractCtx *ctx, TSNode body) {
     }
     if (bt_pos > 0) {
         bt_buf[bt_pos] = '\0';
-        return cbm_arena_strdup(ctx->arena, bt_buf);
+        return ctx_arena_strdup(ctx->arena, bt_buf);
     }
     return NULL;
 }
@@ -115,38 +115,38 @@ static char *extract_body_ident_tokens(CBMExtractCtx *ctx, TSNode body) {
 /* Compute MinHash fingerprint for a function body node and store in def.
  * Sets def->fingerprint (arena-allocated) and def->fingerprint_k on success,
  * leaves them NULL/0 if the body is too short. */
-static void compute_fingerprint(CBMExtractCtx *ctx, CBMDefinition *def, TSNode func_node) {
+static void compute_fingerprint(CtxExtractCtx *ctx, CtxDefinition *def, TSNode func_node) {
     /* Find the function body child */
     TSNode body = ts_node_child_by_field_name(func_node, TS_FIELD("body"));
     if (ts_node_is_null(body)) {
         body = func_node;
     }
-    cbm_minhash_t result;
-    if (!cbm_minhash_compute(body, ctx->source, (int)ctx->language, &result)) {
+    ctx_minhash_t result;
+    if (!ctx_minhash_compute(body, ctx->source, (int)ctx->language, &result)) {
         return; /* Too short or empty — no fingerprint */
     }
     /* Arena-allocate the fingerprint array */
-    uint32_t *fp = cbm_arena_alloc(ctx->arena, CBM_MINHASH_K * sizeof(uint32_t));
+    uint32_t *fp = ctx_arena_alloc(ctx->arena, CTX_MINHASH_K * sizeof(uint32_t));
     if (!fp) {
         return;
     }
-    memcpy(fp, result.values, CBM_MINHASH_K * sizeof(uint32_t));
+    memcpy(fp, result.values, CTX_MINHASH_K * sizeof(uint32_t));
     def->fingerprint = fp;
-    def->fingerprint_k = CBM_MINHASH_K;
+    def->fingerprint_k = CTX_MINHASH_K;
 
     /* AST structural profile (signals 8, 9, 11) — rides the same body node */
-    cbm_ast_profile_t profile;
+    ctx_ast_profile_t profile;
     int pc = 0;
     if (def->param_names) {
         while (def->param_names[pc]) {
             pc++;
         }
     }
-    if (cbm_ast_profile_compute(body, ctx->source, def->param_names, pc, &profile)) {
+    if (ctx_ast_profile_compute(body, ctx->source, def->param_names, pc, &profile)) {
         profile.body_lines = (uint16_t)def->lines;
-        char sp_buf[CBM_AST_PROFILE_BUF];
-        cbm_ast_profile_to_str(&profile, sp_buf, sizeof(sp_buf));
-        def->structural_profile = cbm_arena_strdup(ctx->arena, sp_buf);
+        char sp_buf[CTX_AST_PROFILE_BUF];
+        ctx_ast_profile_to_str(&profile, sp_buf, sizeof(sp_buf));
+        def->structural_profile = ctx_arena_strdup(ctx->arena, sp_buf);
     }
 
     /* Extract raw identifier tokens from body for semantic search */
@@ -170,17 +170,17 @@ enum {
 enum { RT_PAIR_SIZE = 2 };
 
 // Forward declarations
-static void extract_func_def(CBMExtractCtx *ctx, TSNode node, const CBMLangSpec *spec);
-static void extract_class_def(CBMExtractCtx *ctx, TSNode node, const CBMLangSpec *spec);
-static void walk_defs(CBMExtractCtx *ctx, TSNode root, const CBMLangSpec *spec, int depth_unused);
-static void extract_variables(CBMExtractCtx *ctx, TSNode root, const CBMLangSpec *spec);
-static void extract_class_variables(CBMExtractCtx *ctx, TSNode class_node, const CBMLangSpec *spec);
-static void extract_rust_impl(CBMExtractCtx *ctx, TSNode node, const CBMLangSpec *spec);
-static void extract_class_methods(CBMExtractCtx *ctx, TSNode class_node, const char *class_qn,
-                                  const CBMLangSpec *spec);
-static void extract_class_fields(CBMExtractCtx *ctx, TSNode class_node, const char *class_qn,
-                                 const CBMLangSpec *spec);
-static void extract_elixir_call(CBMExtractCtx *ctx, TSNode node, const CBMLangSpec *spec);
+static void extract_func_def(CtxExtractCtx *ctx, TSNode node, const CtxLangSpec *spec);
+static void extract_class_def(CtxExtractCtx *ctx, TSNode node, const CtxLangSpec *spec);
+static void walk_defs(CtxExtractCtx *ctx, TSNode root, const CtxLangSpec *spec, int depth_unused);
+static void extract_variables(CtxExtractCtx *ctx, TSNode root, const CtxLangSpec *spec);
+static void extract_class_variables(CtxExtractCtx *ctx, TSNode class_node, const CtxLangSpec *spec);
+static void extract_rust_impl(CtxExtractCtx *ctx, TSNode node, const CtxLangSpec *spec);
+static void extract_class_methods(CtxExtractCtx *ctx, TSNode class_node, const char *class_qn,
+                                  const CtxLangSpec *spec);
+static void extract_class_fields(CtxExtractCtx *ctx, TSNode class_node, const char *class_qn,
+                                 const CtxLangSpec *spec);
+static void extract_elixir_call(CtxExtractCtx *ctx, TSNode node, const CtxLangSpec *spec);
 
 // --- Helpers ---
 
@@ -237,7 +237,7 @@ static TSNode resolve_julia_func_name(TSNode node) {
 
 // OCaml: resolve value_definition name from let_binding→pattern.
 static TSNode resolve_ocaml_func_name(TSNode node) {
-    TSNode binding = cbm_find_child_by_kind(node, "let_binding");
+    TSNode binding = ctx_find_child_by_kind(node, "let_binding");
     if (!ts_node_is_null(binding)) {
         TSNode pattern = ts_node_child_by_field_name(binding, TS_FIELD("pattern"));
         if (!ts_node_is_null(pattern)) {
@@ -250,21 +250,21 @@ static TSNode resolve_ocaml_func_name(TSNode node) {
 
 // SQL: resolve create_function name from object_reference→identifier or direct identifier.
 static TSNode resolve_sql_func_name(TSNode node) {
-    TSNode obj_ref = cbm_find_child_by_kind(node, "object_reference");
+    TSNode obj_ref = ctx_find_child_by_kind(node, "object_reference");
     if (!ts_node_is_null(obj_ref)) {
-        TSNode id = cbm_find_child_by_kind(obj_ref, "identifier");
+        TSNode id = ctx_find_child_by_kind(obj_ref, "identifier");
         if (!ts_node_is_null(id)) {
             return id;
         }
     }
-    return cbm_find_child_by_kind(node, "identifier");
+    return ctx_find_child_by_kind(node, "identifier");
 }
 
 // Zig: resolve test_declaration name from string→string_content.
 static TSNode resolve_zig_test_name(TSNode node) {
-    TSNode str_node = cbm_find_child_by_kind(node, "string");
+    TSNode str_node = ctx_find_child_by_kind(node, "string");
     if (!ts_node_is_null(str_node)) {
-        TSNode content = cbm_find_child_by_kind(str_node, "string_content");
+        TSNode content = ctx_find_child_by_kind(str_node, "string_content");
         if (!ts_node_is_null(content)) {
             return content;
         }
@@ -275,7 +275,7 @@ static TSNode resolve_zig_test_name(TSNode node) {
 
 // VimScript: resolve function_definition name from function_declaration child.
 static TSNode resolve_vimscript_func_name(TSNode node) {
-    TSNode decl = cbm_find_child_by_kind(node, "function_declaration");
+    TSNode decl = ctx_find_child_by_kind(node, "function_declaration");
     if (!ts_node_is_null(decl) && ts_node_named_child_count(decl) > 0) {
         return ts_node_named_child(decl, 0);
     }
@@ -287,23 +287,23 @@ static TSNode resolve_vimscript_func_name(TSNode node) {
 }
 
 // Resolve function name for scripting/niche languages (Lua, OCaml, SQL, Zig, VimScript, Julia).
-static TSNode resolve_func_name_scripting(TSNode node, CBMLanguage lang, const char *kind) {
-    if (lang == CBM_LANG_LUA && strcmp(kind, "function_definition") == 0) {
+static TSNode resolve_func_name_scripting(TSNode node, CtxLanguage lang, const char *kind) {
+    if (lang == CTX_LANG_LUA && strcmp(kind, "function_definition") == 0) {
         return resolve_lua_func_name(node);
     }
-    if (lang == CBM_LANG_OCAML && strcmp(kind, "value_definition") == 0) {
+    if (lang == CTX_LANG_OCAML && strcmp(kind, "value_definition") == 0) {
         return resolve_ocaml_func_name(node);
     }
-    if (lang == CBM_LANG_SQL && strcmp(kind, "create_function") == 0) {
+    if (lang == CTX_LANG_SQL && strcmp(kind, "create_function") == 0) {
         return resolve_sql_func_name(node);
     }
-    if (lang == CBM_LANG_ZIG && strcmp(kind, "test_declaration") == 0) {
+    if (lang == CTX_LANG_ZIG && strcmp(kind, "test_declaration") == 0) {
         return resolve_zig_test_name(node);
     }
-    if (lang == CBM_LANG_VIMSCRIPT && strcmp(kind, "function_definition") == 0) {
+    if (lang == CTX_LANG_VIMSCRIPT && strcmp(kind, "function_definition") == 0) {
         return resolve_vimscript_func_name(node);
     }
-    if (lang == CBM_LANG_JULIA && strcmp(kind, "function_definition") == 0) {
+    if (lang == CTX_LANG_JULIA && strcmp(kind, "function_definition") == 0) {
         return resolve_julia_func_name(node);
     }
 
@@ -315,7 +315,7 @@ static TSNode resolve_func_name_scripting(TSNode node, CBMLanguage lang, const c
 static TSNode resolve_lean_func_name(TSNode node, TSNode name) {
     TSNode decl_id = ts_node_child_by_field_name(node, TS_FIELD("declId"));
     if (!ts_node_is_null(decl_id)) {
-        TSNode id = cbm_find_child_by_kind(decl_id, "ident");
+        TSNode id = ctx_find_child_by_kind(decl_id, "ident");
         if (!ts_node_is_null(id)) {
             return id;
         }
@@ -327,7 +327,7 @@ static TSNode resolve_lean_func_name(TSNode node, TSNode name) {
     if (!ts_node_is_null(name)) {
         return name;
     }
-    return cbm_find_child_by_kind(node, "ident");
+    return ctx_find_child_by_kind(node, "ident");
 }
 
 // Haskell: resolve function name from first named child (variable/name).
@@ -356,9 +356,9 @@ static TSNode resolve_commonlisp_func_name(TSNode node) {
     if (!ts_node_is_null(fn)) {
         return fn;
     }
-    TSNode header = cbm_find_child_by_kind(node, "defun_header");
+    TSNode header = ctx_find_child_by_kind(node, "defun_header");
     if (!ts_node_is_null(header)) {
-        return cbm_find_child_by_kind(header, "sym_lit");
+        return ctx_find_child_by_kind(header, "sym_lit");
     }
     TSNode null_node = {0};
     return null_node;
@@ -366,18 +366,18 @@ static TSNode resolve_commonlisp_func_name(TSNode node) {
 
 // Makefile: resolve rule name from targets child or word fallback.
 static TSNode resolve_makefile_func_name(TSNode node) {
-    TSNode targets = cbm_find_child_by_kind(node, "targets");
+    TSNode targets = ctx_find_child_by_kind(node, "targets");
     if (!ts_node_is_null(targets) && ts_node_named_child_count(targets) > 0) {
         return ts_node_named_child(targets, 0);
     }
-    return cbm_find_child_by_kind(node, "word");
+    return ctx_find_child_by_kind(node, "word");
 }
 
 // Elm: resolve value_declaration name from functionDeclarationLeft field.
 static TSNode resolve_elm_func_name(TSNode node) {
     TSNode fdl = ts_node_child_by_field_name(node, TS_FIELD("functionDeclarationLeft"));
     if (ts_node_is_null(fdl)) {
-        fdl = cbm_find_child_by_kind(node, "function_declaration_left");
+        fdl = ctx_find_child_by_kind(node, "function_declaration_left");
     }
     if (!ts_node_is_null(fdl) && ts_node_named_child_count(fdl) > 0) {
         return ts_node_named_child(fdl, 0);
@@ -402,35 +402,35 @@ static TSNode resolve_wolfram_func_name(TSNode node) {
 }
 
 // Resolve function name for FP/scientific languages.
-static TSNode resolve_func_name_fp(TSNode node, CBMLanguage lang, const char *kind, TSNode name) {
-    if (lang == CBM_LANG_COMMONLISP && strcmp(kind, "defun") == 0) {
+static TSNode resolve_func_name_fp(TSNode node, CtxLanguage lang, const char *kind, TSNode name) {
+    if (lang == CTX_LANG_COMMONLISP && strcmp(kind, "defun") == 0) {
         return resolve_commonlisp_func_name(node);
     }
 
-    if (lang == CBM_LANG_MAKEFILE && strcmp(kind, "rule") == 0) {
+    if (lang == CTX_LANG_MAKEFILE && strcmp(kind, "rule") == 0) {
         return resolve_makefile_func_name(node);
     }
 
-    if (lang == CBM_LANG_HASKELL && strcmp(kind, "function") == 0) {
+    if (lang == CTX_LANG_HASKELL && strcmp(kind, "function") == 0) {
         return resolve_haskell_func_name(node);
     }
 
-    if (lang == CBM_LANG_ELM && strcmp(kind, "value_declaration") == 0) {
+    if (lang == CTX_LANG_ELM && strcmp(kind, "value_declaration") == 0) {
         return resolve_elm_func_name(node);
     }
 
-    if (lang == CBM_LANG_MATLAB && strcmp(kind, "function_definition") == 0) {
+    if (lang == CTX_LANG_MATLAB && strcmp(kind, "function_definition") == 0) {
         if (!ts_node_is_null(name)) {
             return name;
         }
-        return cbm_find_child_by_kind(node, "identifier");
+        return ctx_find_child_by_kind(node, "identifier");
     }
 
-    if (lang == CBM_LANG_LEAN) {
+    if (lang == CTX_LANG_LEAN) {
         return resolve_lean_func_name(node, name);
     }
 
-    if (lang == CBM_LANG_WOLFRAM &&
+    if (lang == CTX_LANG_WOLFRAM &&
         (strcmp(kind, "set_delayed_top") == 0 || strcmp(kind, "set_top") == 0 ||
          strcmp(kind, "set_delayed") == 0 || strcmp(kind, "set") == 0)) {
         return resolve_wolfram_func_name(node);
@@ -452,7 +452,7 @@ static TSNode resolve_qualified_name(TSNode decl) {
     static const char *name_kinds[] = {"operator_name", "operator_cast",    "destructor_name",
                                        "identifier",    "field_identifier", NULL};
     for (const char **k = name_kinds; *k; k++) {
-        TSNode found = cbm_find_child_by_kind(decl, *k);
+        TSNode found = ctx_find_child_by_kind(decl, *k);
         if (!ts_node_is_null(found)) {
             return found;
         }
@@ -505,7 +505,7 @@ static TSNode resolve_r_func_name(TSNode node) {
 }
 
 // Forward declaration for mutual recursion.
-static TSNode resolve_func_name(TSNode node, CBMLanguage lang);
+static TSNode resolve_func_name(TSNode node, CtxLanguage lang);
 
 // C++/CUDA: find inner function/declaration inside template_declaration.
 // Returns the inner node (not the resolved name) to break the recursive cycle.
@@ -537,8 +537,8 @@ static TSNode resolve_toplevel_arrow_name(TSNode node, const char *kind) {
 }
 
 // Try C/C++/CUDA/GLSL function_definition declarator name or template unwrap.
-static TSNode resolve_func_name_c_family(TSNode *node_ptr, CBMLanguage lang, const char *kind) {
-    if ((lang == CBM_LANG_CPP || lang == CBM_LANG_CUDA) &&
+static TSNode resolve_func_name_c_family(TSNode *node_ptr, CtxLanguage lang, const char *kind) {
+    if ((lang == CTX_LANG_CPP || lang == CTX_LANG_CUDA) &&
         strcmp(kind, "template_declaration") == 0) {
         TSNode inner = resolve_template_inner_node(*node_ptr);
         if (!ts_node_is_null(inner)) {
@@ -547,8 +547,8 @@ static TSNode resolve_func_name_c_family(TSNode *node_ptr, CBMLanguage lang, con
         TSNode null_node = {0};
         return null_node;
     }
-    if ((lang == CBM_LANG_C || lang == CBM_LANG_CPP || lang == CBM_LANG_CUDA ||
-         lang == CBM_LANG_GLSL) &&
+    if ((lang == CTX_LANG_C || lang == CTX_LANG_CPP || lang == CTX_LANG_CUDA ||
+         lang == CTX_LANG_GLSL) &&
         strcmp(kind, "function_definition") == 0) {
         return resolve_c_declarator_name(*node_ptr);
     }
@@ -558,19 +558,19 @@ static TSNode resolve_func_name_c_family(TSNode *node_ptr, CBMLanguage lang, con
 
 // Resolve the name node for a function, handling language-specific quirks.
 // Uses a loop to handle template_declaration unwrapping (avoids recursion).
-static TSNode resolve_func_name(TSNode node, CBMLanguage lang) {
+static TSNode resolve_func_name(TSNode node, CtxLanguage lang) {
     enum { MAX_TEMPLATE_DEPTH = 2 };
     for (int tmpl_depth = 0; tmpl_depth < MAX_TEMPLATE_DEPTH; tmpl_depth++) {
         const char *kind = ts_node_type(node);
 
-        if (lang == CBM_LANG_HASKELL && strcmp(kind, "signature") == 0) {
+        if (lang == CTX_LANG_HASKELL && strcmp(kind, "signature") == 0) {
             TSNode null_node = {0};
             return null_node;
         }
 
         TSNode name = func_name_node(node);
 
-        if (lang == CBM_LANG_R && strcmp(kind, "function_definition") == 0) {
+        if (lang == CTX_LANG_R && strcmp(kind, "function_definition") == 0) {
             return resolve_r_func_name(node);
         }
 
@@ -578,8 +578,8 @@ static TSNode resolve_func_name(TSNode node, CBMLanguage lang) {
             return name;
         }
 
-        if (lang == CBM_LANG_SWIFT && strcmp(kind, "function_declaration") == 0) {
-            TSNode si = cbm_find_child_by_kind(node, "simple_identifier");
+        if (lang == CTX_LANG_SWIFT && strcmp(kind, "function_declaration") == 0) {
+            TSNode si = ctx_find_child_by_kind(node, "simple_identifier");
             if (!ts_node_is_null(si)) {
                 return si;
             }
@@ -623,7 +623,7 @@ static TSNode resolve_func_name(TSNode node, CBMLanguage lang) {
 
 // Check for export_statement ancestor (JS/TS/TSX)
 static bool is_js_exported(TSNode node) {
-    return cbm_has_ancestor_kind(node, "export_statement", EXPORT_ANCESTOR_DEPTH);
+    return ctx_has_ancestor_kind(node, "export_statement", EXPORT_ANCESTOR_DEPTH);
 }
 
 // Check if a node is a comment node type.
@@ -633,8 +633,8 @@ static bool is_comment_node(const char *kind) {
 }
 
 // Extract comment text, truncating to MAX_COMMENT_LEN.
-static char *extract_comment_text(CBMArena *a, TSNode node, const char *source) {
-    char *text = cbm_node_text(a, node, source);
+static char *extract_comment_text(CtxArena *a, TSNode node, const char *source) {
+    char *text = ctx_node_text(a, node, source);
     if (text && strlen(text) > MAX_COMMENT_LEN) {
         text[MAX_COMMENT_LEN] = '\0';
     }
@@ -642,7 +642,7 @@ static char *extract_comment_text(CBMArena *a, TSNode node, const char *source) 
 }
 
 // Go-specific: type_spec/type_alias comment is before the parent type_declaration.
-static const char *extract_go_type_docstring(CBMArena *a, TSNode node, const char *source) {
+static const char *extract_go_type_docstring(CtxArena *a, TSNode node, const char *source) {
     const char *kind = ts_node_type(node);
     if (strcmp(kind, "type_spec") != 0 && strcmp(kind, "type_alias") != 0) {
         return NULL;
@@ -659,7 +659,7 @@ static const char *extract_go_type_docstring(CBMArena *a, TSNode node, const cha
 }
 
 // Python-specific: docstring as first expression_statement -> string in function body.
-static const char *extract_python_docstring(CBMArena *a, TSNode node, const char *source) {
+static const char *extract_python_docstring(CtxArena *a, TSNode node, const char *source) {
     TSNode body = ts_node_child_by_field_name(node, TS_FIELD("body"));
     if (ts_node_is_null(body) || ts_node_named_child_count(body) == 0) {
         return NULL;
@@ -683,9 +683,9 @@ static const char *extract_python_docstring(CBMArena *a, TSNode node, const char
 }
 
 // Extract docstring from the node's leading comment.
-static const char *extract_docstring(CBMArena *a, TSNode node, const char *source,
-                                     CBMLanguage lang) {
-    if (lang == CBM_LANG_GO) {
+static const char *extract_docstring(CtxArena *a, TSNode node, const char *source,
+                                     CtxLanguage lang) {
+    if (lang == CTX_LANG_GO) {
         const char *doc = extract_go_type_docstring(a, node, source);
         if (doc) {
             return doc;
@@ -697,7 +697,7 @@ static const char *extract_docstring(CBMArena *a, TSNode node, const char *sourc
         return extract_comment_text(a, prev, source);
     }
 
-    if (lang == CBM_LANG_PYTHON) {
+    if (lang == CTX_LANG_PYTHON) {
         return extract_python_docstring(a, node, source);
     }
     return NULL;
@@ -754,7 +754,7 @@ static TSNode find_decorator_args(TSNode call_node) {
 }
 
 // Extract route path from decorator arguments (first string that starts with /).
-static const char *extract_route_path_from_args(CBMArena *a, TSNode args, const char *source) {
+static const char *extract_route_path_from_args(CtxArena *a, TSNode args, const char *source) {
     uint32_t nc = ts_node_named_child_count(args);
     for (uint32_t ai = 0; ai < nc && ai < DECORATOR_SCAN_LIMIT; ai++) {
         TSNode arg = ts_node_named_child(args, ai);
@@ -763,11 +763,11 @@ static const char *extract_route_path_from_args(CBMArena *a, TSNode args, const 
             strcmp(ak, "interpreted_string_literal") != 0) {
             continue;
         }
-        char *path = cbm_node_text(a, arg, source);
+        char *path = ctx_node_text(a, arg, source);
         if (path) {
             int plen = (int)strlen(path);
             if (plen >= PAIR_CHARS && (path[0] == '"' || path[0] == '\'')) {
-                path = cbm_arena_strndup(a, path + SKIP_CHAR, (size_t)(plen - PAIR_CHARS));
+                path = ctx_arena_strndup(a, path + SKIP_CHAR, (size_t)(plen - PAIR_CHARS));
             }
             if (path && path[0] == '/') {
                 return path;
@@ -779,7 +779,7 @@ static const char *extract_route_path_from_args(CBMArena *a, TSNode args, const 
 
 // Try to extract a route from a single decorator call node.
 // Returns true if a route method was found (even with fallback path "/").
-static bool try_route_from_decorator_call(CBMArena *a, TSNode dchild, const char *source,
+static bool try_route_from_decorator_call(CtxArena *a, TSNode dchild, const char *source,
                                           const char **out_path, const char **out_method) {
     TSNode fn = ts_node_child_by_field_name(dchild, TS_FIELD("function"));
     if (ts_node_is_null(fn)) {
@@ -789,7 +789,7 @@ static bool try_route_from_decorator_call(CBMArena *a, TSNode dchild, const char
         return false;
     }
 
-    char *fn_text = cbm_node_text(a, fn, source);
+    char *fn_text = ctx_node_text(a, fn, source);
     const char *method = decorator_method_name(fn_text);
     if (!method) {
         return false;
@@ -809,8 +809,8 @@ static bool try_route_from_decorator_call(CBMArena *a, TSNode dchild, const char
     return true;
 }
 
-static void extract_route_from_decorators(CBMArena *a, TSNode func_node, const char *source,
-                                          const CBMLangSpec *spec, const char **out_path,
+static void extract_route_from_decorators(CtxArena *a, TSNode func_node, const char *source,
+                                          const CtxLangSpec *spec, const char **out_path,
                                           const char **out_method) {
     *out_path = NULL;
     *out_method = NULL;
@@ -821,7 +821,7 @@ static void extract_route_from_decorators(CBMArena *a, TSNode func_node, const c
 
     TSNode prev = ts_node_prev_sibling(func_node);
     while (!ts_node_is_null(prev)) {
-        if (!cbm_kind_in_set(prev, spec->decorator_node_types)) {
+        if (!ctx_kind_in_set(prev, spec->decorator_node_types)) {
             break;
         }
 
@@ -841,12 +841,12 @@ static void extract_route_from_decorators(CBMArena *a, TSNode func_node, const c
 
 // Extract decorator names from preceding decorator/annotation nodes
 // Count annotations inside a Java/Kotlin/C# "modifiers" node.
-static int count_modifier_annotations(TSNode modifiers, const CBMLangSpec *spec) {
+static int count_modifier_annotations(TSNode modifiers, const CtxLangSpec *spec) {
     int count = 0;
     uint32_t mc = ts_node_child_count(modifiers);
     for (uint32_t mi = 0; mi < mc; mi++) {
         TSNode mchild = ts_node_child(modifiers, mi);
-        if (cbm_kind_in_set(mchild, spec->decorator_node_types)) {
+        if (ctx_kind_in_set(mchild, spec->decorator_node_types)) {
             count++;
         }
     }
@@ -854,34 +854,34 @@ static int count_modifier_annotations(TSNode modifiers, const CBMLangSpec *spec)
 }
 
 // Find Java/Kotlin/C# modifiers node with annotations.
-static TSNode find_jvm_modifiers(TSNode node, CBMLanguage lang) {
+static TSNode find_jvm_modifiers(TSNode node, CtxLanguage lang) {
     TSNode null_node = {0};
-    if (lang != CBM_LANG_JAVA && lang != CBM_LANG_KOTLIN && lang != CBM_LANG_CSHARP) {
+    if (lang != CTX_LANG_JAVA && lang != CTX_LANG_KOTLIN && lang != CTX_LANG_CSHARP) {
         return null_node;
     }
     TSNode modifiers = ts_node_child_by_field_name(node, TS_FIELD("modifiers"));
     if (ts_node_is_null(modifiers)) {
-        modifiers = cbm_find_child_by_kind(node, "modifiers");
+        modifiers = ctx_find_child_by_kind(node, "modifiers");
     }
     return modifiers;
 }
 
 // Collect decorator texts from a modifiers node into result array starting at idx.
-static int collect_modifier_decorators(CBMArena *a, TSNode modifiers, const char *source,
-                                       const CBMLangSpec *spec, const char **result, int idx,
+static int collect_modifier_decorators(CtxArena *a, TSNode modifiers, const char *source,
+                                       const CtxLangSpec *spec, const char **result, int idx,
                                        int max) {
     uint32_t mc = ts_node_child_count(modifiers);
     for (uint32_t mi = 0; mi < mc && idx < max; mi++) {
         TSNode mchild = ts_node_child(modifiers, mi);
-        if (cbm_kind_in_set(mchild, spec->decorator_node_types)) {
-            result[idx++] = cbm_node_text(a, mchild, source);
+        if (ctx_kind_in_set(mchild, spec->decorator_node_types)) {
+            result[idx++] = ctx_node_text(a, mchild, source);
         }
     }
     return idx;
 }
 
-static const char **extract_decorators(CBMArena *a, TSNode node, const char *source,
-                                       CBMLanguage lang, const CBMLangSpec *spec) {
+static const char **extract_decorators(CtxArena *a, TSNode node, const char *source,
+                                       CtxLanguage lang, const CtxLangSpec *spec) {
     if (!spec->decorator_node_types || !spec->decorator_node_types[0]) {
         return NULL;
     }
@@ -889,7 +889,7 @@ static const char **extract_decorators(CBMArena *a, TSNode node, const char *sou
     int count = 0;
     TSNode prev = ts_node_prev_sibling(node);
     while (!ts_node_is_null(prev)) {
-        if (cbm_kind_in_set(prev, spec->decorator_node_types)) {
+        if (ctx_kind_in_set(prev, spec->decorator_node_types)) {
             count++;
         } else {
             break;
@@ -912,7 +912,7 @@ static const char **extract_decorators(CBMArena *a, TSNode node, const char *sou
     }
 
     const char **result =
-        (const char **)cbm_arena_alloc(a, sizeof(const char *) * (total + NULL_TERM));
+        (const char **)ctx_arena_alloc(a, sizeof(const char *) * (total + NULL_TERM));
     if (!result) {
         return NULL;
     }
@@ -920,8 +920,8 @@ static const char **extract_decorators(CBMArena *a, TSNode node, const char *sou
     int idx = 0;
     prev = ts_node_prev_sibling(node);
     while (!ts_node_is_null(prev) && idx < count) {
-        if (cbm_kind_in_set(prev, spec->decorator_node_types)) {
-            result[idx++] = cbm_node_text(a, prev, source);
+        if (ctx_kind_in_set(prev, spec->decorator_node_types)) {
+            result[idx++] = ctx_node_text(a, prev, source);
         } else {
             break;
         }
@@ -935,26 +935,26 @@ static const char **extract_decorators(CBMArena *a, TSNode node, const char *sou
 }
 
 // Extract base class name text from a single base_class child node.
-static char *extract_cpp_base_text(CBMArena *a, TSNode bc, const char *source) {
+static char *extract_cpp_base_text(CtxArena *a, TSNode bc, const char *source) {
     const char *bk = ts_node_type(bc);
     if (strcmp(bk, "access_specifier") == 0) {
         return NULL;
     }
     if (strcmp(bk, "type_identifier") == 0 || strcmp(bk, "qualified_identifier") == 0 ||
         strcmp(bk, "scoped_identifier") == 0) {
-        return cbm_node_text(a, bc, source);
+        return ctx_node_text(a, bc, source);
     }
     if (strcmp(bk, "template_type") == 0) {
         TSNode tname = ts_node_child_by_field_name(bc, TS_FIELD("name"));
         if (!ts_node_is_null(tname)) {
-            return cbm_node_text(a, tname, source);
+            return ctx_node_text(a, tname, source);
         }
     }
     return NULL;
 }
 
 // Extract base classes from a C++ base_class_clause node.
-static const char **extract_cpp_base_classes(CBMArena *a, TSNode clause, const char *source) {
+static const char **extract_cpp_base_classes(CtxArena *a, TSNode clause, const char *source) {
     const char *bases[MAX_BASES];
     int base_count = 0;
     uint32_t bnc = ts_node_named_child_count(clause);
@@ -966,7 +966,7 @@ static const char **extract_cpp_base_classes(CBMArena *a, TSNode clause, const c
     }
     if (base_count > 0) {
         const char **result =
-            (const char **)cbm_arena_alloc(a, (base_count + NULL_TERM) * sizeof(const char *));
+            (const char **)ctx_arena_alloc(a, (base_count + NULL_TERM) * sizeof(const char *));
         if (result) {
             for (int j = 0; j < base_count; j++) {
                 result[j] = bases[j];
@@ -979,11 +979,11 @@ static const char **extract_cpp_base_classes(CBMArena *a, TSNode clause, const c
 }
 
 // Build a single-element NULL-terminated base class array.
-static const char **make_single_base(CBMArena *a, const char *text) {
+static const char **make_single_base(CtxArena *a, const char *text) {
     if (!text || !text[0]) {
         return NULL;
     }
-    const char **result = (const char **)cbm_arena_alloc(a, sizeof(const char *) * RT_PAIR_SIZE);
+    const char **result = (const char **)ctx_arena_alloc(a, sizeof(const char *) * RT_PAIR_SIZE);
     if (result) {
         result[0] = text;
         result[SKIP_CHAR] = NULL;
@@ -992,7 +992,7 @@ static const char **make_single_base(CBMArena *a, const char *text) {
 }
 
 // Search children for a child matching one of the base_types and return its text as single base.
-static const char **find_base_from_children(CBMArena *a, TSNode node, const char *source,
+static const char **find_base_from_children(CtxArena *a, TSNode node, const char *source,
                                             const char **base_types) {
     uint32_t count = ts_node_child_count(node);
     for (uint32_t i = 0; i < count; i++) {
@@ -1000,7 +1000,7 @@ static const char **find_base_from_children(CBMArena *a, TSNode node, const char
         const char *ck = ts_node_type(child);
         for (const char **t = base_types; *t; t++) {
             if (strcmp(ck, *t) == 0) {
-                const char **r = make_single_base(a, cbm_node_text(a, child, source));
+                const char **r = make_single_base(a, ctx_node_text(a, child, source));
                 if (r) {
                     return r;
                 }
@@ -1011,16 +1011,16 @@ static const char **find_base_from_children(CBMArena *a, TSNode node, const char
 }
 
 /* Extract text from a single C# base_list named child, stripping generic args. */
-static const char *extract_csharp_base_child_text(CBMArena *a, TSNode bc, const char *source) {
+static const char *extract_csharp_base_child_text(CtxArena *a, TSNode bc, const char *source) {
     const char *bk = ts_node_type(bc);
     char *text = NULL;
     if (strcmp(bk, "identifier") == 0 || strcmp(bk, "generic_name") == 0 ||
         strcmp(bk, "qualified_name") == 0) {
-        text = cbm_node_text(a, bc, source);
+        text = ctx_node_text(a, bc, source);
     } else {
         TSNode inner = ts_node_named_child(bc, 0);
         if (!ts_node_is_null(inner)) {
-            text = cbm_node_text(a, inner, source);
+            text = ctx_node_text(a, inner, source);
         }
     }
     if (text && text[0]) {
@@ -1034,7 +1034,7 @@ static const char *extract_csharp_base_child_text(CBMArena *a, TSNode bc, const 
 }
 
 /* Collect bases from a single base_list node into an arena-allocated array. */
-static const char **collect_csharp_bases(CBMArena *a, TSNode base_list, const char *source) {
+static const char **collect_csharp_bases(CtxArena *a, TSNode base_list, const char *source) {
     const char *bases[MAX_BASES];
     int base_count = 0;
     uint32_t bnc = ts_node_named_child_count(base_list);
@@ -1049,7 +1049,7 @@ static const char **collect_csharp_bases(CBMArena *a, TSNode base_list, const ch
         return NULL;
     }
     const char **result =
-        (const char **)cbm_arena_alloc(a, (base_count + NULL_TERM) * sizeof(const char *));
+        (const char **)ctx_arena_alloc(a, (base_count + NULL_TERM) * sizeof(const char *));
     if (!result) {
         return NULL;
     }
@@ -1061,7 +1061,7 @@ static const char **collect_csharp_bases(CBMArena *a, TSNode base_list, const ch
 }
 
 /* C# base_list: iterate children, find base_list node, extract bases. */
-static const char **extract_csharp_base_list(CBMArena *a, TSNode node, const char *source,
+static const char **extract_csharp_base_list(CtxArena *a, TSNode node, const char *source,
                                              uint32_t count) {
     for (uint32_t i = 0; i < count; i++) {
         TSNode child = ts_node_child(node, i);
@@ -1077,8 +1077,8 @@ static const char **extract_csharp_base_list(CBMArena *a, TSNode node, const cha
 }
 
 // Extract base class names from a class node.
-static const char **extract_base_classes(CBMArena *a, TSNode node, const char *source,
-                                         CBMLanguage lang) {
+static const char **extract_base_classes(CtxArena *a, TSNode node, const char *source,
+                                         CtxLanguage lang) {
     (void)lang;
     static const char *fields[] = {"superclass",
                                    "superclasses",
@@ -1092,7 +1092,7 @@ static const char **extract_base_classes(CBMArena *a, TSNode node, const char *s
     for (const char **f = fields; *f; f++) {
         TSNode super = ts_node_child_by_field_name(node, *f, (uint32_t)strlen(*f));
         if (!ts_node_is_null(super)) {
-            const char **r = make_single_base(a, cbm_node_text(a, super, source));
+            const char **r = make_single_base(a, ctx_node_text(a, super, source));
             if (r) {
                 return r;
             }
@@ -1178,7 +1178,7 @@ static bool is_builtin_type(const char *name) {
 }
 
 // Clean a type name: strip *, &, [], ..., generics
-static char *clean_type_name(CBMArena *a, const char *raw) {
+static char *clean_type_name(CtxArena *a, const char *raw) {
     if (!raw || !raw[0]) {
         return NULL;
     }
@@ -1199,7 +1199,7 @@ static char *clean_type_name(CBMArena *a, const char *raw) {
     if (len == 0) {
         return NULL;
     }
-    char *result = cbm_arena_alloc(a, len + NULL_TERM);
+    char *result = ctx_arena_alloc(a, len + NULL_TERM);
     memcpy(result, s, len);
     result[len] = '\0';
     return result;
@@ -1208,18 +1208,18 @@ static char *clean_type_name(CBMArena *a, const char *raw) {
 // Extract param_names from a parameter list node.
 // Returns NULL-terminated arena-allocated array.
 // Extract the parameter name from a single parameter AST node.
-static char *resolve_param_name(CBMArena *a, TSNode param, const char *source) {
+static char *resolve_param_name(CtxArena *a, TSNode param, const char *source) {
     const char *pk = ts_node_type(param);
 
     if (strcmp(pk, "parameter_declaration") == 0) {
         TSNode nm = ts_node_child_by_field_name(param, TS_FIELD("name"));
         if (!ts_node_is_null(nm)) {
-            return cbm_node_text(a, nm, source);
+            return ctx_node_text(a, nm, source);
         }
         return NULL;
     }
     if (strcmp(pk, "identifier") == 0) {
-        return cbm_node_text(a, param, source);
+        return ctx_node_text(a, param, source);
     }
     if (strcmp(pk, "formal_parameter") == 0 || strcmp(pk, "parameter") == 0 ||
         strcmp(pk, "required_parameter") == 0 || strcmp(pk, "optional_parameter") == 0 ||
@@ -1232,15 +1232,15 @@ static char *resolve_param_name(CBMArena *a, TSNode param, const char *source) {
         if (!ts_node_is_null(nm)) {
             if (strcmp(ts_node_type(nm), "identifier") == 0 ||
                 strcmp(ts_node_type(nm), "simple_identifier") == 0) {
-                return cbm_node_text(a, nm, source);
+                return ctx_node_text(a, nm, source);
             }
         }
     }
     return NULL;
 }
 
-static const char **extract_param_names(CBMArena *a, TSNode params, const char *source,
-                                        CBMLanguage lang) {
+static const char **extract_param_names(CtxArena *a, TSNode params, const char *source,
+                                        CtxLanguage lang) {
     (void)lang;
     if (ts_node_is_null(params)) {
         return NULL;
@@ -1268,7 +1268,7 @@ static const char **extract_param_names(CBMArena *a, TSNode params, const char *
     }
 
     const char **result =
-        (const char **)cbm_arena_alloc(a, (count + NULL_TERM) * sizeof(const char *));
+        (const char **)ctx_arena_alloc(a, (count + NULL_TERM) * sizeof(const char *));
     for (int i = 0; i < count; i++) {
         result[i] = names[i];
     }
@@ -1280,7 +1280,7 @@ static const char **extract_param_names(CBMArena *a, TSNode params, const char *
 // Parses Go-style multi-return (T1, T2) and single return types.
 // Returns NULL-terminated arena-allocated array.
 // Clean a type text and add to types array if valid.
-static void add_cleaned_type(CBMArena *a, const char **types, int *count, char *type_text) {
+static void add_cleaned_type(CtxArena *a, const char **types, int *count, char *type_text) {
     if (!type_text || !type_text[0]) {
         return;
     }
@@ -1291,7 +1291,7 @@ static void add_cleaned_type(CBMArena *a, const char **types, int *count, char *
 }
 
 // Extract Go multi-return types from a parameter_list result node.
-static void extract_go_multi_return(CBMArena *a, TSNode rt_node, const char *source,
+static void extract_go_multi_return(CtxArena *a, TSNode rt_node, const char *source,
                                     const char **types, int *count) {
     uint32_t nc = ts_node_child_count(rt_node);
     for (uint32_t i = 0; i < nc && *count < MAX_RETURN_TYPES_MINUS_1; i++) {
@@ -1302,21 +1302,21 @@ static void extract_go_multi_return(CBMArena *a, TSNode rt_node, const char *sou
         if (strcmp(ts_node_type(child), "parameter_declaration") == 0) {
             TSNode tn = ts_node_child_by_field_name(child, TS_FIELD("type"));
             if (!ts_node_is_null(tn)) {
-                add_cleaned_type(a, types, count, cbm_node_text(a, tn, source));
+                add_cleaned_type(a, types, count, ctx_node_text(a, tn, source));
             }
         } else {
-            add_cleaned_type(a, types, count, cbm_node_text(a, child, source));
+            add_cleaned_type(a, types, count, ctx_node_text(a, child, source));
         }
     }
 }
 
 // Build a NULL-terminated arena-allocated string array from a types buffer.
-static const char **build_type_array(CBMArena *a, const char **types, int count) {
+static const char **build_type_array(CtxArena *a, const char **types, int count) {
     if (count == 0) {
         return NULL;
     }
     const char **result =
-        (const char **)cbm_arena_alloc(a, (count + NULL_TERM) * sizeof(const char *));
+        (const char **)ctx_arena_alloc(a, (count + NULL_TERM) * sizeof(const char *));
     for (int i = 0; i < count; i++) {
         result[i] = types[i];
     }
@@ -1324,8 +1324,8 @@ static const char **build_type_array(CBMArena *a, const char **types, int count)
     return result;
 }
 
-static const char **extract_return_types(CBMArena *a, TSNode rt_node, const char *source,
-                                         CBMLanguage lang) {
+static const char **extract_return_types(CtxArena *a, TSNode rt_node, const char *source,
+                                         CtxLanguage lang) {
     (void)lang;
     if (ts_node_is_null(rt_node)) {
         return NULL;
@@ -1337,7 +1337,7 @@ static const char **extract_return_types(CBMArena *a, TSNode rt_node, const char
     if (strcmp(ts_node_type(rt_node), "parameter_list") == 0) {
         extract_go_multi_return(a, rt_node, source, types, &count);
     } else {
-        add_cleaned_type(a, types, &count, cbm_node_text(a, rt_node, source));
+        add_cleaned_type(a, types, &count, ctx_node_text(a, rt_node, source));
     }
 
     return build_type_array(a, types, count);
@@ -1346,8 +1346,8 @@ static const char **extract_return_types(CBMArena *a, TSNode rt_node, const char
 // Extract param_types from a parameter list node.
 // Returns NULL-terminated arena-allocated array.
 // Extract type text from a TypeScript type_annotation child.
-static char *extract_ts_param_type(CBMArena *a, TSNode param, const char *source) {
-    TSNode ta = cbm_find_child_by_kind(param, "type_annotation");
+static char *extract_ts_param_type(CtxArena *a, TSNode param, const char *source) {
+    TSNode ta = ctx_find_child_by_kind(param, "type_annotation");
     if (ts_node_is_null(ta)) {
         return NULL;
     }
@@ -1360,7 +1360,7 @@ static char *extract_ts_param_type(CBMArena *a, TSNode param, const char *source
         const char *tk = ts_node_type(tch);
         if (strcmp(tk, "type_identifier") == 0 || strcmp(tk, "generic_type") == 0 ||
             strcmp(tk, "predefined_type") == 0) {
-            return cbm_node_text(a, tch, source);
+            return ctx_node_text(a, tch, source);
         }
     }
     return NULL;
@@ -1375,33 +1375,33 @@ static bool is_generic_param_kind(const char *pk) {
 }
 
 // Resolve param type for JVM/misc languages (Kotlin, Scala, Dart, Groovy, OCaml).
-static char *resolve_jvm_param_type(CBMArena *a, TSNode param, const char *pk, const char *source,
-                                    CBMLanguage lang) {
+static char *resolve_jvm_param_type(CtxArena *a, TSNode param, const char *pk, const char *source,
+                                    CtxLanguage lang) {
     if (strcmp(pk, "parameter") != 0 && strcmp(pk, "formal_parameter") != 0) {
         return NULL;
     }
-    if (lang == CBM_LANG_KOTLIN) {
+    if (lang == CTX_LANG_KOTLIN) {
         TSNode tn = ts_node_child_by_field_name(param, TS_FIELD("type"));
         if (!ts_node_is_null(tn)) {
-            return cbm_node_text(a, tn, source);
+            return ctx_node_text(a, tn, source);
         }
-        TSNode ut = cbm_find_child_by_kind(param, "user_type");
-        return ts_node_is_null(ut) ? NULL : cbm_node_text(a, ut, source);
+        TSNode ut = ctx_find_child_by_kind(param, "user_type");
+        return ts_node_is_null(ut) ? NULL : ctx_node_text(a, ut, source);
     }
-    if (lang == CBM_LANG_SCALA || lang == CBM_LANG_DART) {
-        TSNode tid = cbm_find_child_by_kind(param, "type_identifier");
-        return ts_node_is_null(tid) ? NULL : cbm_node_text(a, tid, source);
+    if (lang == CTX_LANG_SCALA || lang == CTX_LANG_DART) {
+        TSNode tid = ctx_find_child_by_kind(param, "type_identifier");
+        return ts_node_is_null(tid) ? NULL : ctx_node_text(a, tid, source);
     }
-    if (lang == CBM_LANG_GROOVY) {
+    if (lang == CTX_LANG_GROOVY) {
         TSNode tn = ts_node_child_by_field_name(param, TS_FIELD("type"));
-        return ts_node_is_null(tn) ? NULL : cbm_node_text(a, tn, source);
+        return ts_node_is_null(tn) ? NULL : ctx_node_text(a, tn, source);
     }
-    if (lang == CBM_LANG_OCAML) {
-        TSNode tp = cbm_find_child_by_kind(param, "typed_pattern");
+    if (lang == CTX_LANG_OCAML) {
+        TSNode tp = ctx_find_child_by_kind(param, "typed_pattern");
         if (!ts_node_is_null(tp)) {
             TSNode tn = ts_node_child_by_field_name(tp, TS_FIELD("type"));
             if (!ts_node_is_null(tn)) {
-                return cbm_node_text(a, tn, source);
+                return ctx_node_text(a, tn, source);
             }
         }
         return NULL;
@@ -1410,19 +1410,19 @@ static char *resolve_jvm_param_type(CBMArena *a, TSNode param, const char *pk, c
 }
 
 // Resolve parameter type text for a single param node.
-static char *resolve_param_type_text(CBMArena *a, TSNode param, const char *source,
-                                     CBMLanguage lang) {
+static char *resolve_param_type_text(CtxArena *a, TSNode param, const char *source,
+                                     CtxLanguage lang) {
     const char *pk = ts_node_type(param);
 
-    if (lang == CBM_LANG_TYPESCRIPT || lang == CBM_LANG_TSX) {
+    if (lang == CTX_LANG_TYPESCRIPT || lang == CTX_LANG_TSX) {
         if (strcmp(pk, "required_parameter") == 0 || strcmp(pk, "optional_parameter") == 0) {
             return extract_ts_param_type(a, param, source);
         }
         return NULL;
     }
 
-    if (lang == CBM_LANG_KOTLIN || lang == CBM_LANG_SCALA || lang == CBM_LANG_DART ||
-        lang == CBM_LANG_GROOVY || lang == CBM_LANG_OCAML) {
+    if (lang == CTX_LANG_KOTLIN || lang == CTX_LANG_SCALA || lang == CTX_LANG_DART ||
+        lang == CTX_LANG_GROOVY || lang == CTX_LANG_OCAML) {
         return resolve_jvm_param_type(a, param, pk, source, lang);
     }
 
@@ -1430,14 +1430,14 @@ static char *resolve_param_type_text(CBMArena *a, TSNode param, const char *sour
     if (is_generic_param_kind(pk)) {
         TSNode tn = ts_node_child_by_field_name(param, TS_FIELD("type"));
         if (!ts_node_is_null(tn)) {
-            return cbm_node_text(a, tn, source);
+            return ctx_node_text(a, tn, source);
         }
     }
     return NULL;
 }
 
 // Add a cleaned, deduplicated type to the types array.
-static void add_dedup_type(CBMArena *a, const char **types, int *count, char *type_text) {
+static void add_dedup_type(CtxArena *a, const char **types, int *count, char *type_text) {
     if (!type_text || !type_text[0]) {
         return;
     }
@@ -1453,8 +1453,8 @@ static void add_dedup_type(CBMArena *a, const char **types, int *count, char *ty
     types[(*count)++] = cleaned;
 }
 
-static const char **extract_param_types(CBMArena *a, TSNode params, const char *source,
-                                        CBMLanguage lang) {
+static const char **extract_param_types(CtxArena *a, TSNode params, const char *source,
+                                        CtxLanguage lang) {
     if (ts_node_is_null(params)) {
         return NULL;
     }
@@ -1476,7 +1476,7 @@ static const char **extract_param_types(CBMArena *a, TSNode params, const char *
     }
 
     const char **result =
-        (const char **)cbm_arena_alloc(a, (count + NULL_TERM) * sizeof(const char *));
+        (const char **)ctx_arena_alloc(a, (count + NULL_TERM) * sizeof(const char *));
     for (int i = 0; i < count; i++) {
         result[i] = types[i];
     }
@@ -1487,8 +1487,8 @@ static const char **extract_param_types(CBMArena *a, TSNode params, const char *
 // --- Function definition extraction ---
 
 // For C++/CUDA template_declaration, find the inner function_definition or declaration.
-static TSNode unwrap_template_inner(TSNode node, CBMLanguage lang) {
-    if ((lang == CBM_LANG_CPP || lang == CBM_LANG_CUDA) &&
+static TSNode unwrap_template_inner(TSNode node, CtxLanguage lang) {
+    if ((lang == CTX_LANG_CPP || lang == CTX_LANG_CUDA) &&
         strcmp(ts_node_type(node), "template_declaration") == 0) {
         uint32_t nc = ts_node_named_child_count(node);
         for (uint32_t i = 0; i < nc; i++) {
@@ -1518,8 +1518,8 @@ static TSNode find_c_params(TSNode func_node) {
 
 // C++: resolve trailing return type (auto f() -> Type) on a declarator node.
 // Updates def->return_type and def->return_types if trailing type found.
-static void resolve_cpp_trailing_return(CBMArena *a, TSNode func_node, const char *source,
-                                        CBMDefinition *def) {
+static void resolve_cpp_trailing_return(CtxArena *a, TSNode func_node, const char *source,
+                                        CtxDefinition *def) {
     TSNode declarator = ts_node_child_by_field_name(func_node, TS_FIELD("declarator"));
     if (ts_node_is_null(declarator)) {
         return;
@@ -1529,10 +1529,10 @@ static void resolve_cpp_trailing_return(CBMArena *a, TSNode func_node, const cha
         TSNode ch = ts_node_named_child(declarator, i);
         if (strcmp(ts_node_type(ch), "trailing_return_type") == 0) {
             TSNode type_desc = ts_node_named_child_count(ch) > 0 ? ts_node_named_child(ch, 0) : ch;
-            def->return_type = cbm_node_text(a, type_desc, source);
+            def->return_type = ctx_node_text(a, type_desc, source);
             if (def->return_type && def->return_type[0]) {
                 const char **rt =
-                    (const char **)cbm_arena_alloc(a, RT_PAIR_SIZE * sizeof(const char *));
+                    (const char **)ctx_arena_alloc(a, RT_PAIR_SIZE * sizeof(const char *));
                 if (rt) {
                     rt[0] = def->return_type;
                     rt[SKIP_CHAR] = NULL;
@@ -1544,42 +1544,42 @@ static void resolve_cpp_trailing_return(CBMArena *a, TSNode func_node, const cha
     }
 }
 
-static void extract_func_def(CBMExtractCtx *ctx, TSNode node, const CBMLangSpec *spec) {
-    CBMArena *a = ctx->arena;
+static void extract_func_def(CtxExtractCtx *ctx, TSNode node, const CtxLangSpec *spec) {
+    CtxArena *a = ctx->arena;
 
     TSNode name_node = resolve_func_name(node, ctx->language);
     if (ts_node_is_null(name_node)) {
         return;
     }
 
-    char *name = cbm_node_text(a, name_node, ctx->source);
+    char *name = ctx_node_text(a, name_node, ctx->source);
     if (!name || !name[0] || strcmp(name, "function") == 0) {
         return;
     }
 
     TSNode func_node = unwrap_template_inner(node, ctx->language);
 
-    CBMDefinition def;
+    CtxDefinition def;
     memset(&def, 0, sizeof(def));
 
     def.name = name;
-    def.qualified_name = cbm_fqn_compute(a, ctx->project, ctx->rel_path, name);
+    def.qualified_name = ctx_fqn_compute(a, ctx->project, ctx->rel_path, name);
     def.label = "Function";
     def.file_path = ctx->rel_path;
     def.start_line = ts_node_start_point(node).row + TS_LINE_OFFSET;
     def.end_line = ts_node_end_point(node).row + TS_LINE_OFFSET;
     def.lines = (int)(def.end_line - def.start_line + TS_LINE_OFFSET);
-    def.is_exported = cbm_is_exported(name, ctx->language);
+    def.is_exported = ctx_is_exported(name, ctx->language);
 
     // Parameters — use func_node (inner function for templates)
     TSNode params = ts_node_child_by_field_name(func_node, TS_FIELD("parameters"));
     if (ts_node_is_null(params) &&
-        (ctx->language == CBM_LANG_C || ctx->language == CBM_LANG_CPP ||
-         ctx->language == CBM_LANG_CUDA || ctx->language == CBM_LANG_GLSL)) {
+        (ctx->language == CTX_LANG_C || ctx->language == CTX_LANG_CPP ||
+         ctx->language == CTX_LANG_CUDA || ctx->language == CTX_LANG_GLSL)) {
         params = find_c_params(func_node);
     }
     if (!ts_node_is_null(params)) {
-        def.signature = cbm_node_text(a, params, ctx->source);
+        def.signature = ctx_node_text(a, params, ctx->source);
         def.param_names = extract_param_names(a, params, ctx->source, ctx->language);
         def.param_types = extract_param_types(a, params, ctx->source, ctx->language);
     }
@@ -1589,7 +1589,7 @@ static void extract_func_def(CBMExtractCtx *ctx, TSNode node, const CBMLangSpec 
     for (const char **f = rt_fields; *f; f++) {
         TSNode rt = ts_node_child_by_field_name(func_node, *f, (uint32_t)strlen(*f));
         if (!ts_node_is_null(rt)) {
-            def.return_type = cbm_node_text(a, rt, ctx->source);
+            def.return_type = ctx_node_text(a, rt, ctx->source);
             def.return_types = extract_return_types(a, rt, ctx->source, ctx->language);
             break;
         }
@@ -1597,14 +1597,14 @@ static void extract_func_def(CBMExtractCtx *ctx, TSNode node, const CBMLangSpec 
 
     // C++: trailing return type (auto f() -> Type)
     if (def.return_type && strcmp(def.return_type, "auto") == 0 &&
-        (ctx->language == CBM_LANG_CPP || ctx->language == CBM_LANG_CUDA)) {
+        (ctx->language == CTX_LANG_CPP || ctx->language == CTX_LANG_CUDA)) {
         resolve_cpp_trailing_return(a, func_node, ctx->source, &def);
     }
 
     // Receiver (Go methods)
     TSNode recv = ts_node_child_by_field_name(node, TS_FIELD("receiver"));
     if (!ts_node_is_null(recv)) {
-        def.receiver = cbm_node_text(a, recv, ctx->source);
+        def.receiver = ctx_node_text(a, recv, ctx->source);
         def.label = "Method";
     }
 
@@ -1617,15 +1617,15 @@ static void extract_func_def(CBMExtractCtx *ctx, TSNode node, const CBMLangSpec 
 
     // Complexity
     if (spec->branching_node_types && spec->branching_node_types[0]) {
-        def.complexity = cbm_count_branching(node, spec->branching_node_types);
+        def.complexity = ctx_count_branching(node, spec->branching_node_types);
     }
 
     // MinHash fingerprint
     compute_fingerprint(ctx, &def, func_node);
 
     // JS/TS export detection
-    if (ctx->language == CBM_LANG_JAVASCRIPT || ctx->language == CBM_LANG_TYPESCRIPT ||
-        ctx->language == CBM_LANG_TSX) {
+    if (ctx->language == CTX_LANG_JAVASCRIPT || ctx->language == CTX_LANG_TYPESCRIPT ||
+        ctx->language == CTX_LANG_TSX) {
         if (is_js_exported(node)) {
             def.is_entry_point = true;
         }
@@ -1636,42 +1636,42 @@ static void extract_func_def(CBMExtractCtx *ctx, TSNode node, const CBMLangSpec 
         def.is_entry_point = true;
     }
 
-    cbm_defs_push(&ctx->result->defs, a, def);
+    ctx_defs_push(&ctx->result->defs, a, def);
 }
 
 // --- Class definition extraction ---
 
 // Push a simple class definition (used by config language extractors).
-static void push_simple_class_def(CBMExtractCtx *ctx, TSNode node, char *name, const char *label) {
-    CBMArena *a = ctx->arena;
-    CBMDefinition def;
+static void push_simple_class_def(CtxExtractCtx *ctx, TSNode node, char *name, const char *label) {
+    CtxArena *a = ctx->arena;
+    CtxDefinition def;
     memset(&def, 0, sizeof(def));
     def.name = name;
-    def.qualified_name = cbm_fqn_compute(a, ctx->project, ctx->rel_path, name);
+    def.qualified_name = ctx_fqn_compute(a, ctx->project, ctx->rel_path, name);
     def.label = label;
     def.file_path = ctx->rel_path;
     def.start_line = ts_node_start_point(node).row + TS_LINE_OFFSET;
     def.end_line = ts_node_end_point(node).row + TS_LINE_OFFSET;
     def.is_exported = true;
-    cbm_defs_push(&ctx->result->defs, a, def);
+    ctx_defs_push(&ctx->result->defs, a, def);
 }
 
 // Find TOML table key name from children.
-static char *find_toml_key_name(CBMArena *a, TSNode node, const char *source) {
+static char *find_toml_key_name(CtxArena *a, TSNode node, const char *source) {
     uint32_t nc = ts_node_child_count(node);
     for (uint32_t i = 0; i < nc; i++) {
         TSNode child = ts_node_child(node, i);
         const char *ck = ts_node_type(child);
         if (strcmp(ck, "bare_key") == 0 || strcmp(ck, "dotted_key") == 0 ||
             strcmp(ck, "quoted_key") == 0 || strcmp(ck, "key") == 0) {
-            return cbm_node_text(a, child, source);
+            return ctx_node_text(a, child, source);
         }
     }
     return NULL;
 }
 
 // Extract XML element name from start_tag/self_closing_tag children.
-static char *find_xml_element_name(CBMArena *a, TSNode node, const char *source) {
+static char *find_xml_element_name(CtxArena *a, TSNode node, const char *source) {
     uint32_t nc = ts_node_child_count(node);
     for (uint32_t i = 0; i < nc; i++) {
         TSNode child = ts_node_child(node, i);
@@ -1683,31 +1683,31 @@ static char *find_xml_element_name(CBMArena *a, TSNode node, const char *source)
                 TSNode tag = ts_node_child(child, j);
                 const char *tk = ts_node_type(tag);
                 if (strcmp(tk, "tag_name") == 0 || strcmp(tk, "Name") == 0) {
-                    return cbm_node_text(a, tag, source);
+                    return ctx_node_text(a, tag, source);
                 }
             }
         }
     }
     // Fallback: try "Name" field directly for some XML grammars
-    TSNode name_child = cbm_find_child_by_kind(node, "Name");
+    TSNode name_child = ctx_find_child_by_kind(node, "Name");
     if (!ts_node_is_null(name_child)) {
-        return cbm_node_text(a, name_child, source);
+        return ctx_node_text(a, name_child, source);
     }
     return NULL;
 }
 
 // Extract text from an atx_heading node (# Title).
-static char *extract_atx_heading_text(CBMArena *a, TSNode node, const char *source) {
+static char *extract_atx_heading_text(CtxArena *a, TSNode node, const char *source) {
     uint32_t nc = ts_node_child_count(node);
     for (uint32_t i = 0; i < nc; i++) {
         TSNode child = ts_node_child(node, i);
         const char *ck = ts_node_type(child);
         if (strcmp(ck, "heading_content") == 0 || strcmp(ck, "inline") == 0) {
-            return cbm_node_text(a, child, source);
+            return ctx_node_text(a, child, source);
         }
     }
     // Fallback: strip leading # and spaces from full text
-    char *full = cbm_node_text(a, node, source);
+    char *full = ctx_node_text(a, node, source);
     if (full) {
         char *p = full;
         while (*p == '#') {
@@ -1717,7 +1717,7 @@ static char *extract_atx_heading_text(CBMArena *a, TSNode node, const char *sour
             p++;
         }
         if (*p) {
-            return cbm_arena_strdup(a, p);
+            return ctx_arena_strdup(a, p);
         }
     }
     return NULL;
@@ -1738,58 +1738,58 @@ static char *trim_heading_name(char *name) {
 }
 
 // Extract Markdown heading name from atx_heading or setext_heading.
-static char *extract_markdown_heading_name(CBMArena *a, TSNode node, const char *kind,
+static char *extract_markdown_heading_name(CtxArena *a, TSNode node, const char *kind,
                                            const char *source) {
     char *name = NULL;
     if (strcmp(kind, "atx_heading") == 0) {
         name = extract_atx_heading_text(a, node, source);
     } else {
         if (ts_node_child_count(node) > 0) {
-            name = cbm_node_text(a, ts_node_child(node, 0), source);
+            name = ctx_node_text(a, ts_node_child(node, 0), source);
         }
     }
     return trim_heading_name(name);
 }
 
 // INI: extract section name from section node.
-static char *find_ini_section_name(CBMArena *a, TSNode node, const char *source) {
+static char *find_ini_section_name(CtxArena *a, TSNode node, const char *source) {
     uint32_t nc = ts_node_child_count(node);
     for (uint32_t i = 0; i < nc; i++) {
         if (strcmp(ts_node_type(ts_node_child(node, i)), "section_name") == 0) {
-            return cbm_node_text(a, ts_node_child(node, i), source);
+            return ctx_node_text(a, ts_node_child(node, i), source);
         }
     }
     return NULL;
 }
 
 // HCL: extract block name from identifier child.
-static char *find_hcl_block_name(CBMArena *a, TSNode node, const char *source) {
-    TSNode id = cbm_find_child_by_kind(node, "identifier");
+static char *find_hcl_block_name(CtxArena *a, TSNode node, const char *source) {
+    TSNode id = ctx_find_child_by_kind(node, "identifier");
     if (!ts_node_is_null(id)) {
-        return cbm_node_text(a, id, source);
+        return ctx_node_text(a, id, source);
     }
     return NULL;
 }
 
 // Handle config language class nodes (TOML, INI, XML, Markdown, HCL).
 // Returns true if handled (caller should return early).
-static bool extract_config_class_def(CBMExtractCtx *ctx, TSNode node, const char *kind) {
-    CBMArena *a = ctx->arena;
+static bool extract_config_class_def(CtxExtractCtx *ctx, TSNode node, const char *kind) {
+    CtxArena *a = ctx->arena;
     char *name = NULL;
     const char *label = "Class";
 
-    if (ctx->language == CBM_LANG_TOML &&
+    if (ctx->language == CTX_LANG_TOML &&
         (strcmp(kind, "table") == 0 || strcmp(kind, "table_array_element") == 0)) {
         name = find_toml_key_name(a, node, ctx->source);
-    } else if (ctx->language == CBM_LANG_INI && strcmp(kind, "section") == 0) {
+    } else if (ctx->language == CTX_LANG_INI && strcmp(kind, "section") == 0) {
         name = find_ini_section_name(a, node, ctx->source);
-    } else if (ctx->language == CBM_LANG_XML && strcmp(kind, "element") == 0) {
+    } else if (ctx->language == CTX_LANG_XML && strcmp(kind, "element") == 0) {
         name = find_xml_element_name(a, node, ctx->source);
-    } else if (ctx->language == CBM_LANG_MARKDOWN &&
+    } else if (ctx->language == CTX_LANG_MARKDOWN &&
                (strcmp(kind, "atx_heading") == 0 || strcmp(kind, "setext_heading") == 0)) {
         name = extract_markdown_heading_name(a, node, kind, ctx->source);
         label = "Section";
-    } else if (ctx->language == CBM_LANG_HCL && strcmp(kind, "block") == 0) {
+    } else if (ctx->language == CTX_LANG_HCL && strcmp(kind, "block") == 0) {
         name = find_hcl_block_name(a, node, ctx->source);
     } else {
         return false;
@@ -1801,8 +1801,8 @@ static bool extract_config_class_def(CBMExtractCtx *ctx, TSNode node, const char
     return true;
 }
 
-static void extract_class_def(CBMExtractCtx *ctx, TSNode node, const CBMLangSpec *spec) {
-    CBMArena *a = ctx->arena;
+static void extract_class_def(CtxExtractCtx *ctx, TSNode node, const CtxLangSpec *spec) {
+    CtxArena *a = ctx->arena;
     const char *kind = ts_node_type(node);
 
     if (extract_config_class_def(ctx, node, kind)) {
@@ -1811,18 +1811,18 @@ static void extract_class_def(CBMExtractCtx *ctx, TSNode node, const CBMLangSpec
 
     TSNode name_node = ts_node_child_by_field_name(node, TS_FIELD("name"));
     // ObjC: class name is first identifier child
-    if (ts_node_is_null(name_node) && ctx->language == CBM_LANG_OBJC) {
-        name_node = cbm_find_child_by_kind(node, "identifier");
+    if (ts_node_is_null(name_node) && ctx->language == CTX_LANG_OBJC) {
+        name_node = ctx_find_child_by_kind(node, "identifier");
     }
     // Swift: class name is type_identifier child (no "name" field)
-    if (ts_node_is_null(name_node) && ctx->language == CBM_LANG_SWIFT) {
-        name_node = cbm_find_child_by_kind(node, "type_identifier");
+    if (ts_node_is_null(name_node) && ctx->language == CTX_LANG_SWIFT) {
+        name_node = ctx_find_child_by_kind(node, "type_identifier");
     }
     if (ts_node_is_null(name_node)) {
         return;
     }
 
-    char *name = cbm_node_text(a, name_node, ctx->source);
+    char *name = ctx_node_text(a, name_node, ctx->source);
     if (!name || !name[0]) {
         return;
     }
@@ -1830,9 +1830,9 @@ static void extract_class_def(CBMExtractCtx *ctx, TSNode node, const CBMLangSpec
     // For nested classes, prefix with enclosing class QN (e.g., Outer.Inner)
     const char *class_qn;
     if (ctx->enclosing_class_qn) {
-        class_qn = cbm_arena_sprintf(a, "%s.%s", ctx->enclosing_class_qn, name);
+        class_qn = ctx_arena_sprintf(a, "%s.%s", ctx->enclosing_class_qn, name);
     } else {
-        class_qn = cbm_fqn_compute(a, ctx->project, ctx->rel_path, name);
+        class_qn = ctx_fqn_compute(a, ctx->project, ctx->rel_path, name);
     }
     const char *label = class_label_for_kind(kind);
 
@@ -1849,7 +1849,7 @@ static void extract_class_def(CBMExtractCtx *ctx, TSNode node, const CBMLangSpec
         }
     }
 
-    CBMDefinition def;
+    CtxDefinition def;
     memset(&def, 0, sizeof(def));
     def.name = name;
     def.qualified_name = class_qn;
@@ -1857,12 +1857,12 @@ static void extract_class_def(CBMExtractCtx *ctx, TSNode node, const CBMLangSpec
     def.file_path = ctx->rel_path;
     def.start_line = ts_node_start_point(node).row + TS_LINE_OFFSET;
     def.end_line = ts_node_end_point(node).row + TS_LINE_OFFSET;
-    def.is_exported = cbm_is_exported(name, ctx->language);
+    def.is_exported = ctx_is_exported(name, ctx->language);
     def.base_classes = extract_base_classes(a, node, ctx->source, ctx->language);
     def.decorators = extract_decorators(a, node, ctx->source, ctx->language, spec);
     def.docstring = extract_docstring(a, node, ctx->source, ctx->language);
 
-    cbm_defs_push(&ctx->result->defs, a, def);
+    ctx_defs_push(&ctx->result->defs, a, def);
 
     // Extract methods inside the class
     extract_class_methods(ctx, node, class_qn, spec);
@@ -1875,7 +1875,7 @@ static void extract_class_def(CBMExtractCtx *ctx, TSNode node, const CBMLangSpec
 }
 
 // Find the body/members node inside a class node
-static TSNode find_class_body(TSNode class_node, CBMLanguage lang) {
+static TSNode find_class_body(TSNode class_node, CtxLanguage lang) {
     // Try field names first
     static const char *body_fields[] = {"body", "members", "class_body", "declaration_list", NULL};
     for (const char **f = body_fields; *f; f++) {
@@ -1885,7 +1885,7 @@ static TSNode find_class_body(TSNode class_node, CBMLanguage lang) {
         }
     }
     // Go: type_spec -> type field (interface_type or struct_type)
-    if (lang == CBM_LANG_GO) {
+    if (lang == CTX_LANG_GO) {
         TSNode type_inner = ts_node_child_by_field_name(class_node, TS_FIELD("type"));
         if (!ts_node_is_null(type_inner)) {
             return type_inner;
@@ -1893,7 +1893,7 @@ static TSNode find_class_body(TSNode class_node, CBMLanguage lang) {
     }
     // ObjC: class_implementation/class_interface has no single body node
     // Methods are inside implementation_definition children directly
-    if (lang == CBM_LANG_OBJC) {
+    if (lang == CTX_LANG_OBJC) {
         return class_node; // iterate children of the class node itself
     }
     // Fallback: search children for known body node types
@@ -1926,17 +1926,17 @@ static TSNode find_class_body(TSNode class_node, CBMLanguage lang) {
 // Dart: resolve method name from method_signature/function_signature.
 static TSNode resolve_dart_method_name(TSNode child, const char *ck) {
     if (strcmp(ck, "method_signature") == 0) {
-        TSNode func_sig = cbm_find_child_by_kind(child, "function_signature");
+        TSNode func_sig = ctx_find_child_by_kind(child, "function_signature");
         if (!ts_node_is_null(func_sig)) {
             TSNode name_node = func_name_node(func_sig);
             if (!ts_node_is_null(name_node)) {
                 return name_node;
             }
-            return cbm_find_child_by_kind(func_sig, "identifier");
+            return ctx_find_child_by_kind(func_sig, "identifier");
         }
     }
     if (strcmp(ck, "function_signature") == 0) {
-        return cbm_find_child_by_kind(child, "identifier");
+        return ctx_find_child_by_kind(child, "identifier");
     }
     TSNode null_node = {0};
     return null_node;
@@ -1959,7 +1959,7 @@ static TSNode resolve_arrow_func_name(TSNode child) {
 }
 
 // Try to extract method name from a node, with language-specific fallbacks.
-static TSNode resolve_method_name(TSNode child, CBMLanguage lang) {
+static TSNode resolve_method_name(TSNode child, CtxLanguage lang) {
     TSNode name_node = func_name_node(child);
     if (!ts_node_is_null(name_node)) {
         return name_node;
@@ -1967,30 +1967,30 @@ static TSNode resolve_method_name(TSNode child, CBMLanguage lang) {
 
     const char *ck = ts_node_type(child);
 
-    if ((lang == CBM_LANG_C || lang == CBM_LANG_CPP || lang == CBM_LANG_CUDA ||
-         lang == CBM_LANG_GLSL) &&
+    if ((lang == CTX_LANG_C || lang == CTX_LANG_CPP || lang == CTX_LANG_CUDA ||
+         lang == CTX_LANG_GLSL) &&
         strcmp(ck, "function_definition") == 0) {
         return resolve_func_name(child, lang);
     }
 
-    if (lang == CBM_LANG_GROOVY && strcmp(ck, "function_definition") == 0) {
+    if (lang == CTX_LANG_GROOVY && strcmp(ck, "function_definition") == 0) {
         TSNode fn = ts_node_child_by_field_name(child, TS_FIELD("function"));
         if (!ts_node_is_null(fn)) {
             return fn;
         }
-        return cbm_find_child_by_kind(child, "identifier");
+        return ctx_find_child_by_kind(child, "identifier");
     }
 
-    if (lang == CBM_LANG_DART) {
+    if (lang == CTX_LANG_DART) {
         return resolve_dart_method_name(child, ck);
     }
 
-    if (lang == CBM_LANG_OBJC && strcmp(ck, "method_definition") == 0) {
-        return cbm_find_child_by_kind(child, "identifier");
+    if (lang == CTX_LANG_OBJC && strcmp(ck, "method_definition") == 0) {
+        return ctx_find_child_by_kind(child, "identifier");
     }
 
-    if (lang == CBM_LANG_SWIFT && strcmp(ck, "function_declaration") == 0) {
-        return cbm_find_child_by_kind(child, "simple_identifier");
+    if (lang == CTX_LANG_SWIFT && strcmp(ck, "function_declaration") == 0) {
+        return ctx_find_child_by_kind(child, "simple_identifier");
     }
 
     if (strcmp(ck, "arrow_function") == 0) {
@@ -2002,18 +2002,18 @@ static TSNode resolve_method_name(TSNode child, CBMLanguage lang) {
 }
 
 // Push a single method definition
-static void push_method_def(CBMExtractCtx *ctx, TSNode child, const char *class_qn,
-                            const CBMLangSpec *spec, TSNode name_node) {
-    CBMArena *a = ctx->arena;
+static void push_method_def(CtxExtractCtx *ctx, TSNode child, const char *class_qn,
+                            const CtxLangSpec *spec, TSNode name_node) {
+    CtxArena *a = ctx->arena;
 
-    char *name = cbm_node_text(a, name_node, ctx->source);
+    char *name = ctx_node_text(a, name_node, ctx->source);
     if (!name || !name[0]) {
         return;
     }
 
-    const char *method_qn = cbm_arena_sprintf(a, "%s.%s", class_qn, name);
+    const char *method_qn = ctx_arena_sprintf(a, "%s.%s", class_qn, name);
 
-    CBMDefinition def;
+    CtxDefinition def;
     memset(&def, 0, sizeof(def));
     def.name = name;
     def.qualified_name = method_qn;
@@ -2023,11 +2023,11 @@ static void push_method_def(CBMExtractCtx *ctx, TSNode child, const char *class_
     def.start_line = ts_node_start_point(child).row + TS_LINE_OFFSET;
     def.end_line = ts_node_end_point(child).row + TS_LINE_OFFSET;
     def.lines = (int)(def.end_line - def.start_line + TS_LINE_OFFSET);
-    def.is_exported = cbm_is_exported(name, ctx->language);
+    def.is_exported = ctx_is_exported(name, ctx->language);
 
     TSNode params = ts_node_child_by_field_name(child, TS_FIELD("parameters"));
     if (!ts_node_is_null(params)) {
-        def.signature = cbm_node_text(a, params, ctx->source);
+        def.signature = ctx_node_text(a, params, ctx->source);
         def.param_types = extract_param_types(a, params, ctx->source, ctx->language);
     }
 
@@ -2037,7 +2037,7 @@ static void push_method_def(CBMExtractCtx *ctx, TSNode child, const char *class_
         for (const char **f = rt_fields; *f; f++) {
             TSNode rt = ts_node_child_by_field_name(child, *f, (uint32_t)strlen(*f));
             if (!ts_node_is_null(rt)) {
-                def.return_type = cbm_node_text(a, rt, ctx->source);
+                def.return_type = ctx_node_text(a, rt, ctx->source);
                 break;
             }
         }
@@ -2045,7 +2045,7 @@ static void push_method_def(CBMExtractCtx *ctx, TSNode child, const char *class_
 
     // C++: trailing return type (auto method() -> Type)
     if (def.return_type && strcmp(def.return_type, "auto") == 0 &&
-        (ctx->language == CBM_LANG_CPP || ctx->language == CBM_LANG_CUDA)) {
+        (ctx->language == CTX_LANG_CPP || ctx->language == CTX_LANG_CUDA)) {
         resolve_cpp_trailing_return(a, child, ctx->source, &def);
     }
 
@@ -2054,25 +2054,25 @@ static void push_method_def(CBMExtractCtx *ctx, TSNode child, const char *class_
     def.docstring = extract_docstring(a, child, ctx->source, ctx->language);
 
     if (spec->branching_node_types && spec->branching_node_types[0]) {
-        def.complexity = cbm_count_branching(child, spec->branching_node_types);
+        def.complexity = ctx_count_branching(child, spec->branching_node_types);
     }
 
     // MinHash fingerprint
     compute_fingerprint(ctx, &def, child);
 
-    cbm_defs_push(&ctx->result->defs, a, def);
+    ctx_defs_push(&ctx->result->defs, a, def);
 }
 
 // Extract methods from an ObjC implementation_definition node.
-static void extract_objc_impl_methods(CBMExtractCtx *ctx, TSNode impl_node, const char *class_qn,
-                                      const CBMLangSpec *spec) {
+static void extract_objc_impl_methods(CtxExtractCtx *ctx, TSNode impl_node, const char *class_qn,
+                                      const CtxLangSpec *spec) {
     uint32_t nc = ts_node_child_count(impl_node);
     for (uint32_t j = 0; j < nc; j++) {
         TSNode inner = ts_node_child(impl_node, j);
         if (ts_node_is_null(inner)) {
             continue;
         }
-        if (cbm_kind_in_set(inner, spec->function_node_types)) {
+        if (ctx_kind_in_set(inner, spec->function_node_types)) {
             TSNode nm = resolve_method_name(inner, ctx->language);
             if (!ts_node_is_null(nm)) {
                 push_method_def(ctx, inner, class_qn, spec, nm);
@@ -2082,8 +2082,8 @@ static void extract_objc_impl_methods(CBMExtractCtx *ctx, TSNode impl_node, cons
 }
 
 // Extract methods inside a class body
-static void extract_class_methods(CBMExtractCtx *ctx, TSNode class_node, const char *class_qn,
-                                  const CBMLangSpec *spec) {
+static void extract_class_methods(CtxExtractCtx *ctx, TSNode class_node, const char *class_qn,
+                                  const CtxLangSpec *spec) {
     TSNode body = find_class_body(class_node, ctx->language);
     if (ts_node_is_null(body)) {
         return;
@@ -2096,13 +2096,13 @@ static void extract_class_methods(CBMExtractCtx *ctx, TSNode class_node, const c
             continue;
         }
 
-        if (ctx->language == CBM_LANG_OBJC &&
+        if (ctx->language == CTX_LANG_OBJC &&
             strcmp(ts_node_type(child), "implementation_definition") == 0) {
             extract_objc_impl_methods(ctx, child, class_qn, spec);
             continue;
         }
 
-        if (!cbm_kind_in_set(child, spec->function_node_types)) {
+        if (!ctx_kind_in_set(child, spec->function_node_types)) {
             continue;
         }
 
@@ -2117,15 +2117,15 @@ static void extract_class_methods(CBMExtractCtx *ctx, TSNode class_node, const c
 
 // --- Rust impl block extraction ---
 
-static void extract_rust_impl(CBMExtractCtx *ctx, TSNode node, const CBMLangSpec *spec) {
-    CBMArena *a = ctx->arena;
+static void extract_rust_impl(CtxExtractCtx *ctx, TSNode node, const CtxLangSpec *spec) {
+    CtxArena *a = ctx->arena;
 
     TSNode type_node = ts_node_child_by_field_name(node, TS_FIELD("type"));
     if (ts_node_is_null(type_node)) {
         return;
     }
 
-    char *type_name = cbm_node_text(a, type_node, ctx->source);
+    char *type_name = ctx_node_text(a, type_node, ctx->source);
     if (!type_name || !type_name[0]) {
         return;
     }
@@ -2133,16 +2133,16 @@ static void extract_rust_impl(CBMExtractCtx *ctx, TSNode node, const CBMLangSpec
     // Check for "impl Trait for Struct" pattern
     TSNode trait_node = ts_node_child_by_field_name(node, TS_FIELD("trait"));
     if (!ts_node_is_null(trait_node)) {
-        char *trait_name = cbm_node_text(a, trait_node, ctx->source);
+        char *trait_name = ctx_node_text(a, trait_node, ctx->source);
         if (trait_name && trait_name[0]) {
-            CBMImplTrait it;
+            CtxImplTrait it;
             it.trait_name = trait_name;
             it.struct_name = type_name;
-            cbm_impltrait_push(&ctx->result->impl_traits, a, it);
+            ctx_impltrait_push(&ctx->result->impl_traits, a, it);
         }
     }
 
-    const char *type_qn = cbm_fqn_compute(a, ctx->project, ctx->rel_path, type_name);
+    const char *type_qn = ctx_fqn_compute(a, ctx->project, ctx->rel_path, type_name);
 
     // Extract methods inside impl body
     TSNode body = ts_node_child_by_field_name(node, TS_FIELD("body"));
@@ -2156,7 +2156,7 @@ static void extract_rust_impl(CBMExtractCtx *ctx, TSNode node, const CBMLangSpec
         if (ts_node_is_null(child)) {
             continue;
         }
-        if (!cbm_kind_in_set(child, spec->function_node_types)) {
+        if (!ctx_kind_in_set(child, spec->function_node_types)) {
             continue;
         }
 
@@ -2165,14 +2165,14 @@ static void extract_rust_impl(CBMExtractCtx *ctx, TSNode node, const CBMLangSpec
             continue;
         }
 
-        char *name = cbm_node_text(a, name_node, ctx->source);
+        char *name = ctx_node_text(a, name_node, ctx->source);
         if (!name || !name[0]) {
             continue;
         }
 
-        const char *method_qn = cbm_arena_sprintf(a, "%s.%s", type_qn, name);
+        const char *method_qn = ctx_arena_sprintf(a, "%s.%s", type_qn, name);
 
-        CBMDefinition def;
+        CtxDefinition def;
         memset(&def, 0, sizeof(def));
         def.name = name;
         def.qualified_name = method_qn;
@@ -2181,22 +2181,22 @@ static void extract_rust_impl(CBMExtractCtx *ctx, TSNode node, const CBMLangSpec
         def.parent_class = type_qn;
         def.start_line = ts_node_start_point(child).row + TS_LINE_OFFSET;
         def.end_line = ts_node_end_point(child).row + TS_LINE_OFFSET;
-        def.is_exported = cbm_is_exported(name, ctx->language);
+        def.is_exported = ctx_is_exported(name, ctx->language);
 
         TSNode params = ts_node_child_by_field_name(child, TS_FIELD("parameters"));
         if (!ts_node_is_null(params)) {
-            def.signature = cbm_node_text(a, params, ctx->source);
+            def.signature = ctx_node_text(a, params, ctx->source);
             def.param_types = extract_param_types(a, params, ctx->source, ctx->language);
         }
 
         if (spec->branching_node_types && spec->branching_node_types[0]) {
-            def.complexity = cbm_count_branching(child, spec->branching_node_types);
+            def.complexity = ctx_count_branching(child, spec->branching_node_types);
         }
 
         // MinHash fingerprint
         compute_fingerprint(ctx, &def, child);
 
-        cbm_defs_push(&ctx->result->defs, a, def);
+        ctx_defs_push(&ctx->result->defs, a, def);
     }
 }
 
@@ -2212,8 +2212,8 @@ static TSNode elixir_call_args(TSNode node) {
 }
 
 // Handle Elixir def/defp/defmacro — extract function definition.
-static void extract_elixir_func_def(CBMExtractCtx *ctx, TSNode node, const char *macro) {
-    CBMArena *a = ctx->arena;
+static void extract_elixir_func_def(CtxExtractCtx *ctx, TSNode node, const char *macro) {
+    CtxArena *a = ctx->arena;
     TSNode args = elixir_call_args(node);
     if (ts_node_is_null(args)) {
         return;
@@ -2227,29 +2227,29 @@ static void extract_elixir_func_def(CBMExtractCtx *ctx, TSNode node, const char 
     const char *fk = ts_node_type(first_arg);
     char *name = NULL;
     if (strcmp(fk, "call") == 0 && ts_node_child_count(first_arg) > 0) {
-        name = cbm_node_text(a, ts_node_child(first_arg, 0), ctx->source);
+        name = ctx_node_text(a, ts_node_child(first_arg, 0), ctx->source);
     } else if (strcmp(fk, "identifier") == 0) {
-        name = cbm_node_text(a, first_arg, ctx->source);
+        name = ctx_node_text(a, first_arg, ctx->source);
     }
     if (!name || !name[0]) {
         return;
     }
 
-    CBMDefinition def;
+    CtxDefinition def;
     memset(&def, 0, sizeof(def));
     def.name = name;
-    def.qualified_name = cbm_fqn_compute(a, ctx->project, ctx->rel_path, name);
+    def.qualified_name = ctx_fqn_compute(a, ctx->project, ctx->rel_path, name);
     def.label = "Function";
     def.file_path = ctx->rel_path;
     def.start_line = ts_node_start_point(node).row + TS_LINE_OFFSET;
     def.end_line = ts_node_end_point(node).row + TS_LINE_OFFSET;
     def.is_exported = (strcmp(macro, "def") == 0 || strcmp(macro, "defmacro") == 0);
-    cbm_defs_push(&ctx->result->defs, a, def);
+    ctx_defs_push(&ctx->result->defs, a, def);
 }
 
 // Emit Class definition for an Elixir defmodule node. Returns do_block or null.
-static TSNode emit_elixir_module_class(CBMExtractCtx *ctx, TSNode cur) {
-    CBMArena *a = ctx->arena;
+static TSNode emit_elixir_module_class(CtxExtractCtx *ctx, TSNode cur) {
+    CtxArena *a = ctx->arena;
     TSNode null_node = {0};
     TSNode args = elixir_call_args(cur);
     if (ts_node_is_null(args)) {
@@ -2259,27 +2259,27 @@ static TSNode emit_elixir_module_class(CBMExtractCtx *ctx, TSNode cur) {
     if (ts_node_is_null(name_node)) {
         return null_node;
     }
-    char *name = cbm_node_text(a, name_node, ctx->source);
+    char *name = ctx_node_text(a, name_node, ctx->source);
     if (!name || !name[0]) {
         return null_node;
     }
-    CBMDefinition def;
+    CtxDefinition def;
     memset(&def, 0, sizeof(def));
     def.name = name;
-    def.qualified_name = cbm_fqn_compute(a, ctx->project, ctx->rel_path, name);
+    def.qualified_name = ctx_fqn_compute(a, ctx->project, ctx->rel_path, name);
     def.label = "Class";
     def.file_path = ctx->rel_path;
     def.start_line = ts_node_start_point(cur).row + TS_LINE_OFFSET;
     def.end_line = ts_node_end_point(cur).row + TS_LINE_OFFSET;
     def.is_exported = true;
-    cbm_defs_push(&ctx->result->defs, a, def);
-    return cbm_find_child_by_kind(cur, "do_block");
+    ctx_defs_push(&ctx->result->defs, a, def);
+    return ctx_find_child_by_kind(cur, "do_block");
 }
 
 // Process Elixir call nodes iteratively — handles defmodule/def/defp/defmacro
 // without recursion between extract_elixir_call ↔ extract_elixir_module_def.
-#define ELIXIR_STACK_CAP CBM_SZ_64
-static void extract_elixir_call(CBMExtractCtx *ctx, TSNode node, const CBMLangSpec *spec) {
+#define ELIXIR_STACK_CAP CTX_SZ_64
+static void extract_elixir_call(CtxExtractCtx *ctx, TSNode node, const CtxLangSpec *spec) {
     (void)spec;
     TSNode stack[ELIXIR_STACK_CAP];
     int top = 0;
@@ -2287,7 +2287,7 @@ static void extract_elixir_call(CBMExtractCtx *ctx, TSNode node, const CBMLangSp
 
     while (top > 0) {
         TSNode cur = stack[--top];
-        CBMArena *a = ctx->arena;
+        CtxArena *a = ctx->arena;
 
         if (ts_node_child_count(cur) == 0) {
             continue;
@@ -2296,7 +2296,7 @@ static void extract_elixir_call(CBMExtractCtx *ctx, TSNode node, const CBMLangSp
         if (ts_node_is_null(callee)) {
             continue;
         }
-        char *macro = cbm_node_text(a, callee, ctx->source);
+        char *macro = ctx_node_text(a, callee, ctx->source);
         if (!macro) {
             continue;
         }
@@ -2322,26 +2322,26 @@ static void extract_elixir_call(CBMExtractCtx *ctx, TSNode node, const CBMLangSp
 // --- Variable extraction ---
 
 // Helper to push a Variable definition
-static void push_var_def(CBMExtractCtx *ctx, const char *name, TSNode node) {
+static void push_var_def(CtxExtractCtx *ctx, const char *name, TSNode node) {
     if (!name || !name[0] || strcmp(name, "_") == 0) {
         return;
     }
-    CBMArena *a = ctx->arena;
-    CBMDefinition def;
+    CtxArena *a = ctx->arena;
+    CtxDefinition def;
     memset(&def, 0, sizeof(def));
     def.name = name;
-    def.qualified_name = cbm_fqn_compute(a, ctx->project, ctx->rel_path, name);
+    def.qualified_name = ctx_fqn_compute(a, ctx->project, ctx->rel_path, name);
     def.label = "Variable";
     def.file_path = ctx->rel_path;
     def.start_line = ts_node_start_point(node).row + TS_LINE_OFFSET;
     def.end_line = ts_node_end_point(node).row + TS_LINE_OFFSET;
-    def.is_exported = cbm_is_exported(name, ctx->language);
-    cbm_defs_push(&ctx->result->defs, a, def);
+    def.is_exported = ctx_is_exported(name, ctx->language);
+    ctx_defs_push(&ctx->result->defs, a, def);
 }
 
 // Helper: extract name from a declarator chain (C/C++/ObjC)
 // declaration > init_declarator > declarator (may be pointer_declarator > identifier)
-static const char *extract_c_declarator_name(CBMArena *a, TSNode decl, const char *source) {
+static const char *extract_c_declarator_name(CtxArena *a, TSNode decl, const char *source) {
     // Try "declarator" field on the declaration
     TSNode declarator = ts_node_child_by_field_name(decl, TS_FIELD("declarator"));
     if (ts_node_is_null(declarator)) {
@@ -2366,13 +2366,13 @@ static const char *extract_c_declarator_name(CBMArena *a, TSNode decl, const cha
         dk = ts_node_type(declarator);
     }
     if (strcmp(dk, "identifier") == 0) {
-        return cbm_node_text(a, declarator, source);
+        return ctx_node_text(a, declarator, source);
     }
     return NULL;
 }
 
 // Helper: extract name from Java/C# field_declaration (declarator > name)
-static const char *extract_java_field_name(CBMArena *a, TSNode field, const char *source) {
+static const char *extract_java_field_name(CtxArena *a, TSNode field, const char *source) {
     TSNode declarator = ts_node_child_by_field_name(field, TS_FIELD("declarator"));
     if (ts_node_is_null(declarator)) {
         // Try iterating children for variable_declarator
@@ -2390,7 +2390,7 @@ static const char *extract_java_field_name(CBMArena *a, TSNode field, const char
     }
     TSNode name = ts_node_child_by_field_name(declarator, TS_FIELD("name"));
     if (!ts_node_is_null(name)) {
-        return cbm_node_text(a, name, source);
+        return ctx_node_text(a, name, source);
     }
     return NULL;
 }
@@ -2398,7 +2398,7 @@ static const char *extract_java_field_name(CBMArena *a, TSNode field, const char
 /* ── Variable name extractors by language group ─────────────────── */
 
 // C# variable extraction: handle field_declaration with nested variable_declaration.
-static void extract_csharp_vars(CBMExtractCtx *ctx, TSNode node, CBMArena *a) {
+static void extract_csharp_vars(CtxExtractCtx *ctx, TSNode node, CtxArena *a) {
     const char *fname = extract_java_field_name(a, node, ctx->source);
     if (fname) {
         push_var_def(ctx, fname, node);
@@ -2416,10 +2416,10 @@ static void extract_csharp_vars(CBMExtractCtx *ctx, TSNode node, CBMArena *a) {
             if (strcmp(ts_node_type(decl), "variable_declarator") == 0) {
                 TSNode id = ts_node_child_by_field_name(decl, TS_FIELD("name"));
                 if (ts_node_is_null(id)) {
-                    id = cbm_find_child_by_kind(decl, "identifier");
+                    id = ctx_find_child_by_kind(decl, "identifier");
                 }
                 if (!ts_node_is_null(id)) {
-                    push_var_def(ctx, cbm_node_text(a, id, ctx->source), decl);
+                    push_var_def(ctx, ctx_node_text(a, id, ctx->source), decl);
                 }
             }
         }
@@ -2427,7 +2427,7 @@ static void extract_csharp_vars(CBMExtractCtx *ctx, TSNode node, CBMArena *a) {
 }
 
 // JS/TS variable extraction: skip function-assigned declarators.
-static void extract_js_vars(CBMExtractCtx *ctx, TSNode node, CBMArena *a) {
+static void extract_js_vars(CtxExtractCtx *ctx, TSNode node, CtxArena *a) {
     uint32_t n = ts_node_named_child_count(node);
     for (uint32_t i = 0; i < n; i++) {
         TSNode child = ts_node_named_child(node, i);
@@ -2444,23 +2444,23 @@ static void extract_js_vars(CBMExtractCtx *ctx, TSNode node, CBMArena *a) {
         }
         TSNode vname = ts_node_child_by_field_name(child, TS_FIELD("name"));
         if (!ts_node_is_null(vname)) {
-            push_var_def(ctx, cbm_node_text(a, vname, ctx->source), child);
+            push_var_def(ctx, ctx_node_text(a, vname, ctx->source), child);
         }
     }
 }
 
-static void extract_vars_mainstream(CBMExtractCtx *ctx, TSNode node, CBMArena *a,
+static void extract_vars_mainstream(CtxExtractCtx *ctx, TSNode node, CtxArena *a,
                                     const char *kind) {
     (void)kind;
     switch (ctx->language) {
-    case CBM_LANG_PYTHON: {
+    case CTX_LANG_PYTHON: {
         TSNode left = ts_node_child_by_field_name(node, TS_FIELD("left"));
         if (!ts_node_is_null(left) && strcmp(ts_node_type(left), "identifier") == 0) {
-            push_var_def(ctx, cbm_node_text(a, left, ctx->source), node);
+            push_var_def(ctx, ctx_node_text(a, left, ctx->source), node);
         }
         break;
     }
-    case CBM_LANG_GO: {
+    case CTX_LANG_GO: {
         uint32_t n = ts_node_named_child_count(node);
         for (uint32_t i = 0; i < n; i++) {
             TSNode child = ts_node_named_child(node, i);
@@ -2468,40 +2468,40 @@ static void extract_vars_mainstream(CBMExtractCtx *ctx, TSNode node, CBMArena *a
             if (strcmp(ck, "var_spec") == 0 || strcmp(ck, "const_spec") == 0) {
                 TSNode vname = ts_node_child_by_field_name(child, TS_FIELD("name"));
                 if (!ts_node_is_null(vname)) {
-                    push_var_def(ctx, cbm_node_text(a, vname, ctx->source), child);
+                    push_var_def(ctx, ctx_node_text(a, vname, ctx->source), child);
                 }
             }
         }
         break;
     }
-    case CBM_LANG_JAVASCRIPT:
-    case CBM_LANG_TYPESCRIPT:
-    case CBM_LANG_TSX:
+    case CTX_LANG_JAVASCRIPT:
+    case CTX_LANG_TYPESCRIPT:
+    case CTX_LANG_TSX:
         extract_js_vars(ctx, node, a);
         break;
-    case CBM_LANG_JAVA: {
+    case CTX_LANG_JAVA: {
         const char *fname = extract_java_field_name(a, node, ctx->source);
         if (fname) {
             push_var_def(ctx, fname, node);
         }
         break;
     }
-    case CBM_LANG_CSHARP:
+    case CTX_LANG_CSHARP:
         extract_csharp_vars(ctx, node, a);
         break;
-    case CBM_LANG_CPP:
-    case CBM_LANG_C:
-    case CBM_LANG_OBJC: {
+    case CTX_LANG_CPP:
+    case CTX_LANG_C:
+    case CTX_LANG_OBJC: {
         const char *vname = extract_c_declarator_name(a, node, ctx->source);
         if (vname) {
             push_var_def(ctx, vname, node);
         }
         break;
     }
-    case CBM_LANG_RUST: {
+    case CTX_LANG_RUST: {
         TSNode name_node = ts_node_child_by_field_name(node, TS_FIELD("name"));
         if (!ts_node_is_null(name_node)) {
-            push_var_def(ctx, cbm_node_text(a, name_node, ctx->source), node);
+            push_var_def(ctx, ctx_node_text(a, name_node, ctx->source), node);
         }
         break;
     }
@@ -2511,14 +2511,14 @@ static void extract_vars_mainstream(CBMExtractCtx *ctx, TSNode node, CBMArena *a
 }
 
 // Lua variable extraction: handle assignment_statement with function-def filtering.
-static void extract_lua_vars(CBMExtractCtx *ctx, TSNode node, CBMArena *a) {
+static void extract_lua_vars(CtxExtractCtx *ctx, TSNode node, CtxArena *a) {
     uint32_t n = ts_node_named_child_count(node);
     for (uint32_t i = 0; i < n; i++) {
         TSNode child = ts_node_named_child(node, i);
         if (strcmp(ts_node_type(child), "assignment_statement") != 0) {
             continue;
         }
-        TSNode expr_list = cbm_find_child_by_kind(child, "expression_list");
+        TSNode expr_list = ctx_find_child_by_kind(child, "expression_list");
         if (!ts_node_is_null(expr_list) && ts_node_named_child_count(expr_list) > 0) {
             TSNode val = ts_node_named_child(expr_list, 0);
             if (!ts_node_is_null(val) && strcmp(ts_node_type(val), "function_definition") == 0) {
@@ -2527,12 +2527,12 @@ static void extract_lua_vars(CBMExtractCtx *ctx, TSNode node, CBMArena *a) {
         }
         TSNode vars = ts_node_child_by_field_name(child, TS_FIELD("variables"));
         if (ts_node_is_null(vars)) {
-            vars = cbm_find_child_by_kind(child, "variable_list");
+            vars = ctx_find_child_by_kind(child, "variable_list");
         }
         if (!ts_node_is_null(vars) && ts_node_named_child_count(vars) > 0) {
             TSNode first = ts_node_named_child(vars, 0);
             if (!ts_node_is_null(first)) {
-                push_var_def(ctx, cbm_node_text(a, first, ctx->source), node);
+                push_var_def(ctx, ctx_node_text(a, first, ctx->source), node);
             }
         }
     }
@@ -2554,13 +2554,13 @@ static bool is_perl_var_type(const char *ck) {
 }
 
 // Perl variable extraction: handle direct variable nodes and assignment_expression.
-static void extract_perl_vars(CBMExtractCtx *ctx, TSNode node, CBMArena *a) {
+static void extract_perl_vars(CtxExtractCtx *ctx, TSNode node, CtxArena *a) {
     uint32_t n = ts_node_named_child_count(node);
     for (uint32_t i = 0; i < n; i++) {
         TSNode child = ts_node_named_child(node, i);
         const char *ck = ts_node_type(child);
         if (is_perl_var_type(ck)) {
-            push_var_def(ctx, strip_perl_sigil(cbm_node_text(a, child, ctx->source)), node);
+            push_var_def(ctx, strip_perl_sigil(ctx_node_text(a, child, ctx->source)), node);
             return;
         }
         if (strcmp(ck, "assignment_expression") != 0) {
@@ -2583,13 +2583,13 @@ static void extract_perl_vars(CBMExtractCtx *ctx, TSNode node, CBMArena *a) {
                 }
             }
         }
-        push_var_def(ctx, strip_perl_sigil(cbm_node_text(a, left, ctx->source)), node);
+        push_var_def(ctx, strip_perl_sigil(ctx_node_text(a, left, ctx->source)), node);
         return;
     }
 }
 
 // R variable extraction: skip function-definitions, then extract left/lhs.
-static void extract_r_vars(CBMExtractCtx *ctx, TSNode node, CBMArena *a) {
+static void extract_r_vars(CtxExtractCtx *ctx, TSNode node, CtxArena *a) {
     uint32_t rnc = ts_node_named_child_count(node);
     for (uint32_t ri = 0; ri < rnc; ri++) {
         TSNode rch = ts_node_named_child(node, ri);
@@ -2608,13 +2608,13 @@ static void extract_r_vars(CBMExtractCtx *ctx, TSNode node, CBMArena *a) {
         const char *lk = ts_node_type(left);
         if (strcmp(lk, "identifier") == 0 || strcmp(lk, "constant") == 0 ||
             strcmp(lk, "string") == 0) {
-            push_var_def(ctx, cbm_node_text(a, left, ctx->source), node);
+            push_var_def(ctx, ctx_node_text(a, left, ctx->source), node);
         }
     }
 }
 
 // PHP variable extraction from expression_statement.
-static void extract_php_vars(CBMExtractCtx *ctx, TSNode node, CBMArena *a, const char *kind) {
+static void extract_php_vars(CtxExtractCtx *ctx, TSNode node, CtxArena *a, const char *kind) {
     if (strcmp(kind, "expression_statement") != 0) {
         return;
     }
@@ -2624,7 +2624,7 @@ static void extract_php_vars(CBMExtractCtx *ctx, TSNode node, CBMArena *a, const
         if (strcmp(ts_node_type(inner), "assignment_expression") == 0) {
             TSNode left = ts_node_child_by_field_name(inner, TS_FIELD("left"));
             if (!ts_node_is_null(left)) {
-                char *name = cbm_node_text(a, left, ctx->source);
+                char *name = ctx_node_text(a, left, ctx->source);
                 if (name && name[0] == '$') {
                     name++;
                 }
@@ -2634,28 +2634,28 @@ static void extract_php_vars(CBMExtractCtx *ctx, TSNode node, CBMArena *a, const
     }
 }
 
-static void extract_vars_dynamic(CBMExtractCtx *ctx, TSNode node, CBMArena *a, const char *kind) {
+static void extract_vars_dynamic(CtxExtractCtx *ctx, TSNode node, CtxArena *a, const char *kind) {
     switch (ctx->language) {
-    case CBM_LANG_PHP:
+    case CTX_LANG_PHP:
         extract_php_vars(ctx, node, a, kind);
         break;
-    case CBM_LANG_LUA:
+    case CTX_LANG_LUA:
         extract_lua_vars(ctx, node, a);
         break;
-    case CBM_LANG_RUBY: {
+    case CTX_LANG_RUBY: {
         TSNode left = ts_node_child_by_field_name(node, TS_FIELD("left"));
         if (!ts_node_is_null(left)) {
             const char *lk = ts_node_type(left);
             if (strcmp(lk, "identifier") == 0 || strcmp(lk, "constant") == 0) {
-                push_var_def(ctx, cbm_node_text(a, left, ctx->source), node);
+                push_var_def(ctx, ctx_node_text(a, left, ctx->source), node);
             }
         }
         break;
     }
-    case CBM_LANG_R:
+    case CTX_LANG_R:
         extract_r_vars(ctx, node, a);
         break;
-    case CBM_LANG_PERL:
+    case CTX_LANG_PERL:
         extract_perl_vars(ctx, node, a);
         break;
     default:
@@ -2669,48 +2669,48 @@ static TSNode resolve_kotlin_var_name(TSNode node) {
     if (!ts_node_is_null(name_node)) {
         return name_node;
     }
-    name_node = cbm_find_child_by_kind(node, "simple_identifier");
+    name_node = ctx_find_child_by_kind(node, "simple_identifier");
     if (!ts_node_is_null(name_node)) {
         return name_node;
     }
-    name_node = cbm_find_child_by_kind(node, "identifier");
+    name_node = ctx_find_child_by_kind(node, "identifier");
     if (!ts_node_is_null(name_node)) {
         return name_node;
     }
-    TSNode var_decl = cbm_find_child_by_kind(node, "variable_declaration");
+    TSNode var_decl = ctx_find_child_by_kind(node, "variable_declaration");
     if (!ts_node_is_null(var_decl)) {
-        name_node = cbm_find_child_by_kind(var_decl, "simple_identifier");
+        name_node = ctx_find_child_by_kind(var_decl, "simple_identifier");
         if (!ts_node_is_null(name_node)) {
             return name_node;
         }
-        return cbm_find_child_by_kind(var_decl, "identifier");
+        return ctx_find_child_by_kind(var_decl, "identifier");
     }
     TSNode null_node = {0};
     return null_node;
 }
 
-static void extract_vars_jvm(CBMExtractCtx *ctx, TSNode node, CBMArena *a) {
+static void extract_vars_jvm(CtxExtractCtx *ctx, TSNode node, CtxArena *a) {
     switch (ctx->language) {
-    case CBM_LANG_SCALA: {
+    case CTX_LANG_SCALA: {
         TSNode pattern = ts_node_child_by_field_name(node, TS_FIELD("pattern"));
         if (!ts_node_is_null(pattern)) {
-            push_var_def(ctx, cbm_node_text(a, pattern, ctx->source), node);
+            push_var_def(ctx, ctx_node_text(a, pattern, ctx->source), node);
         } else {
             TSNode name_node = ts_node_child_by_field_name(node, TS_FIELD("name"));
             if (!ts_node_is_null(name_node)) {
-                push_var_def(ctx, cbm_node_text(a, name_node, ctx->source), node);
+                push_var_def(ctx, ctx_node_text(a, name_node, ctx->source), node);
             }
         }
         break;
     }
-    case CBM_LANG_KOTLIN: {
+    case CTX_LANG_KOTLIN: {
         TSNode name_node = resolve_kotlin_var_name(node);
         if (!ts_node_is_null(name_node)) {
-            push_var_def(ctx, cbm_node_text(a, name_node, ctx->source), node);
+            push_var_def(ctx, ctx_node_text(a, name_node, ctx->source), node);
         }
         break;
     }
-    case CBM_LANG_GROOVY: {
+    case CTX_LANG_GROOVY: {
         TSNode name_node = ts_node_child_by_field_name(node, TS_FIELD("name"));
         if (ts_node_is_null(name_node)) {
             const char *cname = extract_c_declarator_name(a, node, ctx->source);
@@ -2718,10 +2718,10 @@ static void extract_vars_jvm(CBMExtractCtx *ctx, TSNode node, CBMArena *a) {
                 push_var_def(ctx, cname, node);
                 break;
             }
-            name_node = cbm_find_child_by_kind(node, "identifier");
+            name_node = ctx_find_child_by_kind(node, "identifier");
         }
         if (!ts_node_is_null(name_node)) {
-            push_var_def(ctx, cbm_node_text(a, name_node, ctx->source), node);
+            push_var_def(ctx, ctx_node_text(a, name_node, ctx->source), node);
         }
         break;
     }
@@ -2747,13 +2747,13 @@ static char *trim_whitespace(char *name) {
 }
 
 // INI variable extraction: find setting_name/name child, with fallback to first child.
-static void extract_ini_vars(CBMExtractCtx *ctx, TSNode node, CBMArena *a) {
+static void extract_ini_vars(CtxExtractCtx *ctx, TSNode node, CtxArena *a) {
     uint32_t nc = ts_node_child_count(node);
     for (uint32_t i = 0; i < nc; i++) {
         TSNode child = ts_node_child(node, i);
         const char *ck = ts_node_type(child);
         if (strcmp(ck, "setting_name") == 0 || strcmp(ck, "name") == 0) {
-            push_var_def(ctx, trim_whitespace(cbm_node_text(a, child, ctx->source)), node);
+            push_var_def(ctx, trim_whitespace(ctx_node_text(a, child, ctx->source)), node);
             return;
         }
     }
@@ -2768,13 +2768,13 @@ static void extract_ini_vars(CBMExtractCtx *ctx, TSNode node, CBMArena *a) {
         }
         if (!found_name) {
             push_var_def(
-                ctx, trim_whitespace(cbm_node_text(a, ts_node_child(node, 0), ctx->source)), node);
+                ctx, trim_whitespace(ctx_node_text(a, ts_node_child(node, 0), ctx->source)), node);
         }
     }
 }
 
 // Find first named child matching one of the given types and push as var def.
-static void push_first_matching_child(CBMExtractCtx *ctx, TSNode node, CBMArena *a,
+static void push_first_matching_child(CtxExtractCtx *ctx, TSNode node, CtxArena *a,
                                       const char **match_types) {
     uint32_t n = ts_node_named_child_count(node);
     for (uint32_t i = 0; i < n; i++) {
@@ -2782,7 +2782,7 @@ static void push_first_matching_child(CBMExtractCtx *ctx, TSNode node, CBMArena 
         const char *ck = ts_node_type(child);
         for (const char **t = match_types; *t; t++) {
             if (strcmp(ck, *t) == 0) {
-                push_var_def(ctx, cbm_node_text(a, child, ctx->source), node);
+                push_var_def(ctx, ctx_node_text(a, child, ctx->source), node);
                 return;
             }
         }
@@ -2790,12 +2790,12 @@ static void push_first_matching_child(CBMExtractCtx *ctx, TSNode node, CBMArena 
 }
 
 // JSON variable extraction: strip quotes from key.
-static void extract_json_var(CBMExtractCtx *ctx, TSNode node, CBMArena *a) {
+static void extract_json_var(CtxExtractCtx *ctx, TSNode node, CtxArena *a) {
     TSNode key_node = ts_node_child_by_field_name(node, TS_FIELD("key"));
     if (ts_node_is_null(key_node)) {
         return;
     }
-    char *raw = cbm_node_text(a, key_node, ctx->source);
+    char *raw = ctx_node_text(a, key_node, ctx->source);
     if (raw) {
         size_t rlen = strlen(raw);
         if (rlen >= PAIR_CHARS && raw[0] == '"' && raw[rlen - SKIP_CHAR] == '"') {
@@ -2807,67 +2807,67 @@ static void extract_json_var(CBMExtractCtx *ctx, TSNode node, CBMArena *a) {
 }
 
 // SCSS variable extraction: try property > name > property_name > variable_name.
-static void extract_scss_var(CBMExtractCtx *ctx, TSNode node, CBMArena *a) {
+static void extract_scss_var(CtxExtractCtx *ctx, TSNode node, CtxArena *a) {
     TSNode prop = ts_node_child_by_field_name(node, TS_FIELD("property"));
     if (ts_node_is_null(prop)) {
         prop = ts_node_child_by_field_name(node, TS_FIELD("name"));
     }
     if (ts_node_is_null(prop)) {
-        prop = cbm_find_child_by_kind(node, "property_name");
+        prop = ctx_find_child_by_kind(node, "property_name");
     }
     if (ts_node_is_null(prop)) {
-        prop = cbm_find_child_by_kind(node, "variable_name");
+        prop = ctx_find_child_by_kind(node, "variable_name");
     }
     if (!ts_node_is_null(prop)) {
-        push_var_def(ctx, cbm_node_text(a, prop, ctx->source), node);
+        push_var_def(ctx, ctx_node_text(a, prop, ctx->source), node);
     }
 }
 
-static void extract_vars_config(CBMExtractCtx *ctx, TSNode node, CBMArena *a, const char *kind) {
+static void extract_vars_config(CtxExtractCtx *ctx, TSNode node, CtxArena *a, const char *kind) {
     switch (ctx->language) {
-    case CBM_LANG_YAML: {
+    case CTX_LANG_YAML: {
         TSNode key = ts_node_child_by_field_name(node, TS_FIELD("key"));
         if (!ts_node_is_null(key)) {
-            push_var_def(ctx, cbm_node_text(a, key, ctx->source), node);
+            push_var_def(ctx, ctx_node_text(a, key, ctx->source), node);
         }
         break;
     }
-    case CBM_LANG_TOML: {
+    case CTX_LANG_TOML: {
         char *name = find_toml_key_name(a, node, ctx->source);
         if (name) {
             push_var_def(ctx, name, node);
         }
         break;
     }
-    case CBM_LANG_JSON:
+    case CTX_LANG_JSON:
         extract_json_var(ctx, node, a);
         break;
-    case CBM_LANG_INI:
+    case CTX_LANG_INI:
         extract_ini_vars(ctx, node, a);
         break;
-    case CBM_LANG_ERLANG: {
+    case CTX_LANG_ERLANG: {
         if (strcmp(kind, "pp_define") == 0 || strcmp(kind, "record_decl") == 0) {
             static const char *erlang_var_types[] = {"atom", "var", "macro_lhs", NULL};
             push_first_matching_child(ctx, node, a, erlang_var_types);
         }
         break;
     }
-    case CBM_LANG_SQL: {
+    case CTX_LANG_SQL: {
         static const char *sql_var_types[] = {"identifier", "object_reference", NULL};
         push_first_matching_child(ctx, node, a, sql_var_types);
         break;
     }
-    case CBM_LANG_BASH: {
+    case CTX_LANG_BASH: {
         TSNode name_node = ts_node_child_by_field_name(node, TS_FIELD("name"));
         if (!ts_node_is_null(name_node)) {
-            push_var_def(ctx, cbm_node_text(a, name_node, ctx->source), node);
+            push_var_def(ctx, ctx_node_text(a, name_node, ctx->source), node);
         } else {
             static const char *bash_var_types[] = {"variable_name", "word", NULL};
             push_first_matching_child(ctx, node, a, bash_var_types);
         }
         break;
     }
-    case CBM_LANG_SCSS:
+    case CTX_LANG_SCSS:
         extract_scss_var(ctx, node, a);
         break;
     default:
@@ -2877,49 +2877,49 @@ static void extract_vars_config(CBMExtractCtx *ctx, TSNode node, CBMArena *a, co
 
 /* ── Variable name extraction dispatcher ────────────────────────── */
 
-static void extract_var_names(CBMExtractCtx *ctx, TSNode node, const CBMLangSpec *spec) {
+static void extract_var_names(CtxExtractCtx *ctx, TSNode node, const CtxLangSpec *spec) {
     (void)spec;
-    CBMArena *a = ctx->arena;
+    CtxArena *a = ctx->arena;
     const char *kind = ts_node_type(node);
 
     switch (ctx->language) {
     /* Mainstream + C-family + Rust */
-    case CBM_LANG_PYTHON:
-    case CBM_LANG_GO:
-    case CBM_LANG_JAVASCRIPT:
-    case CBM_LANG_TYPESCRIPT:
-    case CBM_LANG_TSX:
-    case CBM_LANG_JAVA:
-    case CBM_LANG_CSHARP:
-    case CBM_LANG_CPP:
-    case CBM_LANG_C:
-    case CBM_LANG_OBJC:
-    case CBM_LANG_RUST:
+    case CTX_LANG_PYTHON:
+    case CTX_LANG_GO:
+    case CTX_LANG_JAVASCRIPT:
+    case CTX_LANG_TYPESCRIPT:
+    case CTX_LANG_TSX:
+    case CTX_LANG_JAVA:
+    case CTX_LANG_CSHARP:
+    case CTX_LANG_CPP:
+    case CTX_LANG_C:
+    case CTX_LANG_OBJC:
+    case CTX_LANG_RUST:
         extract_vars_mainstream(ctx, node, a, kind);
         return;
     /* Dynamic/scripting */
-    case CBM_LANG_PHP:
-    case CBM_LANG_LUA:
-    case CBM_LANG_RUBY:
-    case CBM_LANG_R:
-    case CBM_LANG_PERL:
+    case CTX_LANG_PHP:
+    case CTX_LANG_LUA:
+    case CTX_LANG_RUBY:
+    case CTX_LANG_R:
+    case CTX_LANG_PERL:
         extract_vars_dynamic(ctx, node, a, kind);
         return;
     /* JVM (non-Java) */
-    case CBM_LANG_SCALA:
-    case CBM_LANG_KOTLIN:
-    case CBM_LANG_GROOVY:
+    case CTX_LANG_SCALA:
+    case CTX_LANG_KOTLIN:
+    case CTX_LANG_GROOVY:
         extract_vars_jvm(ctx, node, a);
         return;
     /* Config + other */
-    case CBM_LANG_YAML:
-    case CBM_LANG_TOML:
-    case CBM_LANG_JSON:
-    case CBM_LANG_INI:
-    case CBM_LANG_ERLANG:
-    case CBM_LANG_SQL:
-    case CBM_LANG_BASH:
-    case CBM_LANG_SCSS:
+    case CTX_LANG_YAML:
+    case CTX_LANG_TOML:
+    case CTX_LANG_JSON:
+    case CTX_LANG_INI:
+    case CTX_LANG_ERLANG:
+    case CTX_LANG_SQL:
+    case CTX_LANG_BASH:
+    case CTX_LANG_SCSS:
         extract_vars_config(ctx, node, a, kind);
         return;
     default:
@@ -2929,7 +2929,7 @@ static void extract_var_names(CBMExtractCtx *ctx, TSNode node, const CBMLangSpec
     /* Default fallback: name field → C-declarator → first identifier */
     TSNode name_node = ts_node_child_by_field_name(node, TS_FIELD("name"));
     if (!ts_node_is_null(name_node)) {
-        push_var_def(ctx, cbm_node_text(a, name_node, ctx->source), node);
+        push_var_def(ctx, ctx_node_text(a, name_node, ctx->source), node);
         return;
     }
     const char *cname = extract_c_declarator_name(a, node, ctx->source);
@@ -2941,7 +2941,7 @@ static void extract_var_names(CBMExtractCtx *ctx, TSNode node, const CBMLangSpec
     for (uint32_t i = 0; i < n; i++) {
         TSNode child = ts_node_named_child(node, i);
         if (strcmp(ts_node_type(child), "identifier") == 0) {
-            push_var_def(ctx, cbm_node_text(a, child, ctx->source), node);
+            push_var_def(ctx, ctx_node_text(a, child, ctx->source), node);
             return;
         }
     }
@@ -2949,8 +2949,8 @@ static void extract_var_names(CBMExtractCtx *ctx, TSNode node, const CBMLangSpec
 
 // Iterative variable walker for config languages with nested structure.
 // Used by YAML, TOML, INI, JSON.
-#define VAR_WALK_STACK_CAP CBM_SZ_256
-static void walk_variables_iter(CBMExtractCtx *ctx, TSNode root, const CBMLangSpec *spec) {
+#define VAR_WALK_STACK_CAP CTX_SZ_256
+static void walk_variables_iter(CtxExtractCtx *ctx, TSNode root, const CtxLangSpec *spec) {
     TSNode stack[VAR_WALK_STACK_CAP];
     int top = 0;
     stack[top++] = root;
@@ -2963,8 +2963,8 @@ static void walk_variables_iter(CBMExtractCtx *ctx, TSNode root, const CBMLangSp
             if (ts_node_is_null(child)) {
                 continue;
             }
-            if (cbm_kind_in_set(child, spec->variable_node_types)) {
-                if (cbm_is_module_level(child, ctx->language)) {
+            if (ctx_kind_in_set(child, spec->variable_node_types)) {
+                if (ctx_is_module_level(child, ctx->language)) {
                     extract_var_names(ctx, child, spec);
                 }
             }
@@ -2983,14 +2983,14 @@ static void walk_variables_iter(CBMExtractCtx *ctx, TSNode root, const CBMLangSp
     }
 }
 
-static void extract_variables(CBMExtractCtx *ctx, TSNode root, const CBMLangSpec *spec) {
+static void extract_variables(CtxExtractCtx *ctx, TSNode root, const CtxLangSpec *spec) {
     if (!spec->variable_node_types || !spec->variable_node_types[0]) {
         return;
     }
 
     // Config languages with nested structure: use recursive walk
-    if (ctx->language == CBM_LANG_YAML || ctx->language == CBM_LANG_TOML ||
-        ctx->language == CBM_LANG_INI || ctx->language == CBM_LANG_JSON) {
+    if (ctx->language == CTX_LANG_YAML || ctx->language == CTX_LANG_TOML ||
+        ctx->language == CTX_LANG_INI || ctx->language == CTX_LANG_JSON) {
         walk_variables_iter(ctx, root, spec);
         return;
     }
@@ -3002,11 +3002,11 @@ static void extract_variables(CBMExtractCtx *ctx, TSNode root, const CBMLangSpec
             continue;
         }
 
-        if (!cbm_is_module_level(child, ctx->language)) {
+        if (!ctx_is_module_level(child, ctx->language)) {
             continue;
         }
 
-        if (cbm_kind_in_set(child, spec->variable_node_types)) {
+        if (ctx_kind_in_set(child, spec->variable_node_types)) {
             extract_var_names(ctx, child, spec);
             continue;
         }
@@ -3019,12 +3019,12 @@ static void extract_variables(CBMExtractCtx *ctx, TSNode root, const CBMLangSpec
             uint32_t nc = ts_node_named_child_count(child);
             for (uint32_t j = 0; j < nc; j++) {
                 TSNode inner = ts_node_named_child(child, j);
-                if (cbm_kind_in_set(inner, spec->variable_node_types)) {
+                if (ctx_kind_in_set(inner, spec->variable_node_types)) {
                     extract_var_names(ctx, inner, spec);
                 }
             }
             // Also check if the wrapper itself is a variable type (e.g., PHP expression_statement)
-            if (cbm_kind_in_set(child, spec->variable_node_types)) {
+            if (ctx_kind_in_set(child, spec->variable_node_types)) {
                 extract_var_names(ctx, child, spec);
             }
         }
@@ -3078,8 +3078,8 @@ static TSNode resolve_field_name_node(TSNode child) {
     return name_node;
 }
 
-static void extract_class_fields(CBMExtractCtx *ctx, TSNode class_node, const char *class_qn,
-                                 const CBMLangSpec *spec) {
+static void extract_class_fields(CtxExtractCtx *ctx, TSNode class_node, const char *class_qn,
+                                 const CtxLangSpec *spec) {
     if (!spec->field_node_types || !spec->field_node_types[0]) {
         return;
     }
@@ -3089,11 +3089,11 @@ static void extract_class_fields(CBMExtractCtx *ctx, TSNode class_node, const ch
         return;
     }
 
-    CBMArena *a = ctx->arena;
+    CtxArena *a = ctx->arena;
     uint32_t count = ts_node_named_child_count(body);
     for (uint32_t i = 0; i < count; i++) {
         TSNode child = ts_node_named_child(body, i);
-        if (!cbm_kind_in_set(child, spec->field_node_types)) {
+        if (!ctx_kind_in_set(child, spec->field_node_types)) {
             continue;
         }
 
@@ -3106,7 +3106,7 @@ static void extract_class_fields(CBMExtractCtx *ctx, TSNode class_node, const ch
         if (ts_node_is_null(type_node)) {
             continue;
         }
-        char *type_text = cbm_node_text(a, type_node, ctx->source);
+        char *type_text = ctx_node_text(a, type_node, ctx->source);
         if (!type_text || !type_text[0]) {
             continue;
         }
@@ -3116,14 +3116,14 @@ static void extract_class_fields(CBMExtractCtx *ctx, TSNode class_node, const ch
             continue;
         }
 
-        char *name = cbm_node_text(a, name_node, ctx->source);
+        char *name = ctx_node_text(a, name_node, ctx->source);
         if (!name || !name[0]) {
             continue;
         }
 
-        const char *field_qn = cbm_arena_sprintf(a, "%s.%s", class_qn, name);
+        const char *field_qn = ctx_arena_sprintf(a, "%s.%s", class_qn, name);
 
-        CBMDefinition def;
+        CtxDefinition def;
         memset(&def, 0, sizeof(def));
         def.name = name;
         def.qualified_name = field_qn;
@@ -3133,15 +3133,15 @@ static void extract_class_fields(CBMExtractCtx *ctx, TSNode class_node, const ch
         def.return_type = type_text;
         def.start_line = ts_node_start_point(child).row + TS_LINE_OFFSET;
         def.end_line = ts_node_end_point(child).row + TS_LINE_OFFSET;
-        def.is_exported = cbm_is_exported(name, ctx->language);
+        def.is_exported = ctx_is_exported(name, ctx->language);
 
-        cbm_defs_push(&ctx->result->defs, a, def);
+        ctx_defs_push(&ctx->result->defs, a, def);
     }
 }
 
 // Extract class-level variables (field declarations inside class bodies)
-static void extract_class_variables(CBMExtractCtx *ctx, TSNode class_node,
-                                    const CBMLangSpec *spec) {
+static void extract_class_variables(CtxExtractCtx *ctx, TSNode class_node,
+                                    const CtxLangSpec *spec) {
     if (!spec->variable_node_types || !spec->variable_node_types[0]) {
         return;
     }
@@ -3154,7 +3154,7 @@ static void extract_class_variables(CBMExtractCtx *ctx, TSNode class_node,
     uint32_t count = ts_node_named_child_count(body);
     for (uint32_t i = 0; i < count; i++) {
         TSNode child = ts_node_named_child(body, i);
-        if (cbm_kind_in_set(child, spec->variable_node_types)) {
+        if (ctx_kind_in_set(child, spec->variable_node_types)) {
             extract_var_names(ctx, child, spec);
         }
     }
@@ -3168,11 +3168,11 @@ typedef struct {
     const char *enclosing_class_qn; // saved context for class nesting
 } walk_defs_frame_t;
 
-#define CBM_WALK_DEFS_STACK_CAP 4096
+#define CTX_WALK_DEFS_STACK_CAP 4096
 
 // Push nested class nodes from a class body container onto the defs stack.
 // Iteratively walks into wrapper nodes (field_declaration, template_declaration).
-static void push_nested_class_nodes(TSNode body, const CBMLangSpec *spec, walk_defs_frame_t *stack,
+static void push_nested_class_nodes(TSNode body, const CtxLangSpec *spec, walk_defs_frame_t *stack,
                                     int *top, const char *enclosing_qn) {
     TSNode nc_stack[NESTED_CLASS_STACK_CAP];
     int nc_top = 0;
@@ -3183,8 +3183,8 @@ static void push_nested_class_nodes(TSNode body, const CBMLangSpec *spec, walk_d
         uint32_t nc = ts_node_child_count(cur);
         for (int i = (int)nc - SKIP_CHAR; i >= 0; i--) {
             TSNode child = ts_node_child(cur, (uint32_t)i);
-            if (cbm_kind_in_set(child, spec->class_node_types)) {
-                if (*top < CBM_WALK_DEFS_STACK_CAP) {
+            if (ctx_kind_in_set(child, spec->class_node_types)) {
+                if (*top < CTX_WALK_DEFS_STACK_CAP) {
                     stack[(*top)++] = (walk_defs_frame_t){child, enclosing_qn};
                 }
             } else {
@@ -3201,8 +3201,8 @@ static void push_nested_class_nodes(TSNode body, const CBMLangSpec *spec, walk_d
 }
 
 // Check if a C++/CUDA template_declaration wraps a class/struct/union (not a function).
-static bool is_template_class_node(TSNode node, CBMLanguage lang) {
-    if ((lang != CBM_LANG_CPP && lang != CBM_LANG_CUDA) ||
+static bool is_template_class_node(TSNode node, CtxLanguage lang) {
+    if ((lang != CTX_LANG_CPP && lang != CTX_LANG_CUDA) ||
         strcmp(ts_node_type(node), "template_declaration") != 0) {
         return false;
     }
@@ -3218,28 +3218,28 @@ static bool is_template_class_node(TSNode node, CBMLanguage lang) {
 }
 
 // Compute the enclosing class QN for a class node (for nested class context).
-static const char *compute_class_qn(CBMExtractCtx *ctx, TSNode node, const char *saved_enclosing) {
+static const char *compute_class_qn(CtxExtractCtx *ctx, TSNode node, const char *saved_enclosing) {
     TSNode name_node = ts_node_child_by_field_name(node, TS_FIELD("name"));
-    if (ts_node_is_null(name_node) && ctx->language == CBM_LANG_OBJC) {
-        name_node = cbm_find_child_by_kind(node, "identifier");
+    if (ts_node_is_null(name_node) && ctx->language == CTX_LANG_OBJC) {
+        name_node = ctx_find_child_by_kind(node, "identifier");
     }
-    if (ts_node_is_null(name_node) && ctx->language == CBM_LANG_SWIFT) {
-        name_node = cbm_find_child_by_kind(node, "type_identifier");
+    if (ts_node_is_null(name_node) && ctx->language == CTX_LANG_SWIFT) {
+        name_node = ctx_find_child_by_kind(node, "type_identifier");
     }
     if (!ts_node_is_null(name_node)) {
-        char *cname = cbm_node_text(ctx->arena, name_node, ctx->source);
+        char *cname = ctx_node_text(ctx->arena, name_node, ctx->source);
         if (cname && cname[0]) {
             if (saved_enclosing) {
-                return cbm_arena_sprintf(ctx->arena, "%s.%s", saved_enclosing, cname);
+                return ctx_arena_sprintf(ctx->arena, "%s.%s", saved_enclosing, cname);
             }
-            return cbm_fqn_compute(ctx->arena, ctx->project, ctx->rel_path, cname);
+            return ctx_fqn_compute(ctx->arena, ctx->project, ctx->rel_path, cname);
         }
     }
     return saved_enclosing;
 }
 
 // Push nested class children from a class body container onto the walk stack.
-static void push_class_body_children(TSNode node, const CBMLangSpec *spec, walk_defs_frame_t *stack,
+static void push_class_body_children(TSNode node, const CtxLangSpec *spec, walk_defs_frame_t *stack,
                                      int *top, const char *new_enclosing) {
     uint32_t nc = ts_node_child_count(node);
     for (uint32_t ci = 0; ci < nc; ci++) {
@@ -3253,14 +3253,14 @@ static void push_class_body_children(TSNode node, const CBMLangSpec *spec, walk_
         }
     }
     // No body found — push all children directly
-    for (int ci = (int)nc - SKIP_CHAR; ci >= 0 && *top < CBM_WALK_DEFS_STACK_CAP; ci--) {
+    for (int ci = (int)nc - SKIP_CHAR; ci >= 0 && *top < CTX_WALK_DEFS_STACK_CAP; ci--) {
         stack[(*top)++] = (walk_defs_frame_t){ts_node_child(node, (uint32_t)ci), new_enclosing};
     }
 }
 
-static void walk_defs(CBMExtractCtx *ctx, TSNode root, const CBMLangSpec *spec, int depth_unused) {
+static void walk_defs(CtxExtractCtx *ctx, TSNode root, const CtxLangSpec *spec, int depth_unused) {
     (void)depth_unused;
-    walk_defs_frame_t stack[CBM_WALK_DEFS_STACK_CAP];
+    walk_defs_frame_t stack[CTX_WALK_DEFS_STACK_CAP];
     int top = 0;
     stack[top++] = (walk_defs_frame_t){root, ctx->enclosing_class_qn};
 
@@ -3270,26 +3270,26 @@ static void walk_defs(CBMExtractCtx *ctx, TSNode root, const CBMLangSpec *spec, 
         ctx->enclosing_class_qn = frame.enclosing_class_qn;
         const char *kind = ts_node_type(node);
 
-        if (ctx->language == CBM_LANG_ELIXIR && strcmp(kind, "call") == 0) {
+        if (ctx->language == CTX_LANG_ELIXIR && strcmp(kind, "call") == 0) {
             extract_elixir_call(ctx, node, spec);
             continue;
         }
 
-        if (cbm_kind_in_set(node, spec->function_node_types)) {
+        if (ctx_kind_in_set(node, spec->function_node_types)) {
             if (!is_template_class_node(node, ctx->language)) {
                 extract_func_def(ctx, node, spec);
-                if (ctx->language != CBM_LANG_WOLFRAM) {
+                if (ctx->language != CTX_LANG_WOLFRAM) {
                     continue;
                 }
             }
         }
 
-        if (ctx->language == CBM_LANG_RUST && strcmp(kind, "impl_item") == 0) {
+        if (ctx->language == CTX_LANG_RUST && strcmp(kind, "impl_item") == 0) {
             extract_rust_impl(ctx, node, spec);
             continue;
         }
 
-        if (cbm_kind_in_set(node, spec->class_node_types)) {
+        if (ctx_kind_in_set(node, spec->class_node_types)) {
             extract_class_def(ctx, node, spec);
             const char *new_enclosing = compute_class_qn(ctx, node, frame.enclosing_class_qn);
             push_class_body_children(node, spec, stack, &top, new_enclosing);
@@ -3297,23 +3297,23 @@ static void walk_defs(CBMExtractCtx *ctx, TSNode root, const CBMLangSpec *spec, 
         }
 
         uint32_t count = ts_node_child_count(node);
-        for (int i = (int)count - SKIP_CHAR; i >= 0 && top < CBM_WALK_DEFS_STACK_CAP; i--) {
+        for (int i = (int)count - SKIP_CHAR; i >= 0 && top < CTX_WALK_DEFS_STACK_CAP; i--) {
             stack[top++] =
                 (walk_defs_frame_t){ts_node_child(node, (uint32_t)i), frame.enclosing_class_qn};
         }
     }
 }
 
-void cbm_extract_definitions(CBMExtractCtx *ctx) {
-    const CBMLangSpec *spec = cbm_lang_spec(ctx->language);
+void ctx_extract_definitions(CtxExtractCtx *ctx) {
+    const CtxLangSpec *spec = ctx_lang_spec(ctx->language);
     if (!spec) {
         return;
     }
 
-    CBMArena *a = ctx->arena;
+    CtxArena *a = ctx->arena;
 
     // Create module node (always first definition)
-    CBMDefinition mod;
+    CtxDefinition mod;
     memset(&mod, 0, sizeof(mod));
     mod.name = ctx->rel_path; // will be refined by Go layer
     mod.qualified_name = ctx->module_qn;
@@ -3323,7 +3323,7 @@ void cbm_extract_definitions(CBMExtractCtx *ctx) {
     mod.end_line = ts_node_end_point(ctx->root).row + TS_LINE_OFFSET;
     mod.is_exported = true;
     mod.is_test = ctx->result->is_test_file;
-    cbm_defs_push(&ctx->result->defs, a, mod);
+    ctx_defs_push(&ctx->result->defs, a, mod);
 
     // Walk AST for function/class definitions
     walk_defs(ctx, ctx->root, spec, 0);
