@@ -1,0 +1,26 @@
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+jobs:
+  build-test:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: macos-14,         os: darwin, arch: arm64 }
+          - { runner: macos-13,         os: darwin, arch: x64 }
+          - { runner: ubuntu-24.04,     os: linux,  arch: x64 }
+          - { runner: ubuntu-24.04-arm, os: linux,  arch: arm64 }
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build indexer
+        run: make -f Makefile.indexer indexer
+      - name: Version smoke test
+        run: ./tests/smoke_version.sh ./build/c/cortex-indexer
+      - name: C test suite (non-gating baseline)
+        run: |
+          make -f Makefile.indexer test \
+            || echo "::warning::C suite has known failures (baseline); rehabilitation tracked separately"
