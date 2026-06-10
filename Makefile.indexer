@@ -342,7 +342,7 @@ PP_OBJ_TEST = $(BUILD_DIR)/preprocessor.o
 
 # ── Targets ──────────────────────────────────────────────────────
 
-.PHONY: test test-foundation test-tsan indexer cbm clean-c lint lint-tidy lint-cppcheck lint-format security
+.PHONY: test test-foundation test-tsan indexer clean-c lint lint-tidy lint-cppcheck lint-format security
 
 $(BUILD_DIR):
 	mkdir -p $(BUILD_DIR)
@@ -474,10 +474,6 @@ $(BUILD_DIR)/cortex-indexer: $(MAIN_SRC) $(PROD_SRCS) $(EXTRACTION_SRCS) $(AC_LZ
 
 indexer: $(BUILD_DIR)/cortex-indexer
 	@echo "Built: $(BUILD_DIR)/cortex-indexer"
-
-# Backwards-compatible alias for the pre-rename target name. External callers
-# (e.g. older copies of scripts/build-indexer.sh) may still invoke `cbm`.
-cbm: indexer
 
 # ── ASan-instrumented indexer (diagnostic) ──────────────────────────
 # Builds the production binary with AddressSanitizer + UBSan. Same

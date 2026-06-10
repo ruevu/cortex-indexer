@@ -29,6 +29,16 @@
 #define CTX_VERSION "dev"
 #endif
 
+/* Diagnostic version fields surfaced by `--version` JSON. `version` is the
+ * load-bearing field cortex's ensureIndexer asserts against its pin; schema
+ * (graph-DB layout) and protocol (cli JSON contract) are forward-looking. */
+#ifndef CTX_DB_SCHEMA
+#define CTX_DB_SCHEMA 1
+#endif
+#ifndef CTX_CLI_PROTOCOL
+#define CTX_CLI_PROTOCOL 1
+#endif
+
 enum {
     MAIN_MIN_ARGC = 1,
     MAIN_CLI_ARGC = 2,
@@ -131,7 +141,10 @@ static int handle_subcommand(int argc, char **argv) {
     }
     for (int i = SKIP_ONE; i < argc; i++) {
         if (strcmp(argv[i], "--version") == 0) {
-            printf("cortex-indexer %s\n", CTX_VERSION);
+            /* JSON so cortex's ensureIndexer can parse .version. schema/protocol
+             * are forward-looking diagnostics (DB schema + cli JSON contract). */
+            printf("{\"version\":\"%s\",\"schema\":%d,\"protocol\":%d}\n",
+                   CTX_VERSION, CTX_DB_SCHEMA, CTX_CLI_PROTOCOL);
             return 0;
         }
         if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
