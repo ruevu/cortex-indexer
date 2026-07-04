@@ -228,21 +228,48 @@ static const char *cache_dir(char *buf, size_t bufsz) {
     return buf;
 }
 
-/* Returns full .db path for an explicitly-named project: <cache_dir>/<project>.db.
- * Deliberately bypasses CORTEX_DB env override — that override exists for
- * embedders (Cortex Vue) to redirect the indexer's write path to a custom
- * file, but it must NOT hijack per-project query routing. Without this
- * separation, a tool call like `get_architecture(project="X")` issued from
- * an MCP server that has CORTEX_DB set ends up opening the env-named DB
- * (typically the bound project's local .cortex/db) and reports "project
- * not found" for X — even when X is fully indexed in the cache. Pipeline
- * writes still go through ctx_resolve_db_path so the env override holds
- * where it's wanted. */
+/* Fallback .db path for an explicitly-named project: <cache_dir>/<project>.db.
+ * Query routing prefers the CORTEX_DB env DB when it actually contains the
+ * requested project (see try_env_store below); this cache path is the
+ * fallback, so a tool call like `get_architecture(project="X")` issued from
+ * an MCP server whose CORTEX_DB names some other project's .cortex/db still
+ * finds X in the cache instead of reporting "project not found". */
 static const char *project_db_path(const char *project, char *buf, size_t bufsz) {
     return ctx_cache_db_path(project, buf, bufsz);
 }
 
 /* ── Store resolution ──────────────────────────────────────────── */
+
+/* Try the CORTEX_DB env override for query routing. Cortex's MCP server sets
+ * it per call to the addressed repo's canonical .cortex/db — that copy is
+ * authoritative; the shared cache (~/.cache/cortex-indexer/<project>.db) can
+ * be arbitrarily stale (the 2026-07-04 query_graph stale-reads bug). Returns
+ * an open store only when the env DB opens, passes integrity, AND contains
+ * the requested project; otherwise NULL so the caller falls back to the
+ * cache. Never deletes the env-named DB — we don't own that file. */
+static ctx_store_t *try_env_store(const char *project) {
+    char env_path[CTX_SZ_1K];
+    if (!ctx_safe_getenv("CORTEX_DB", env_path, sizeof(env_path), NULL) || env_path[0] == '\0') {
+        return NULL;
+    }
+    ctx_store_t *store = ctx_store_open_path_query(env_path);
+    if (!store) {
+        return NULL;
+    }
+    if (!ctx_store_check_integrity(store)) {
+        ctx_log_warn("store.env_db_corrupt", "path", env_path, "action",
+                     "falling back to cache db");
+        ctx_store_close(store);
+        return NULL;
+    }
+    ctx_project_t proj_verify = {0};
+    if (ctx_store_get_project(store, project, &proj_verify) != CTX_STORE_OK) {
+        ctx_store_close(store);
+        return NULL;
+    }
+    ctx_project_free_fields(&proj_verify);
+    return store;
+}
 
 /* Open the right project's .db file for query tools.
  * Caches the connection — reopens only when the project changes. */
@@ -260,6 +287,15 @@ static ctx_store_t *resolve_store(ctx_mcp_server_t *srv, const char *project) {
     if (srv->owns_store && srv->store) {
         ctx_store_close(srv->store);
         srv->store = NULL;
+    }
+
+    /* Prefer the CORTEX_DB env DB when it holds the requested project. */
+    srv->store = try_env_store(project);
+    if (srv->store) {
+        srv->owns_store = true;
+        free(srv->current_project);
+        srv->current_project = heap_strdup(project);
+        return srv->store;
     }
 
     /* Open project's .db file — query-only open (no SQLITE_OPEN_CREATE) to

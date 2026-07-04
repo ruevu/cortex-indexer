@@ -395,6 +395,87 @@ TEST(integ_mcp_index_status) {
     PASS();
 }
 
+/* Per-call routing contract: when the parent process sets CORTEX_DB (Cortex's
+ * MCP server points it at the addressed repo's canonical .cortex/db), query
+ * handlers must read THAT database whenever it contains the requested project.
+ * The shared cache copy (~/.cache/cortex-indexer/<slug>.db) can be arbitrarily
+ * stale — serving it produced the 2026-07-04 query_graph stale-reads bug.
+ * Fallback still holds: a CORTEX_DB without the project routes to the cache,
+ * so cross-project queries from a bound env keep working. */
+TEST(integ_query_graph_honors_cortex_db) {
+    /* A distinguishable "canonical" DB: same project row + one marker node. */
+    char canonical[512];
+    snprintf(canonical, sizeof(canonical), "%s/canonical.db", g_tmpdir);
+    unlink(canonical);
+    ctx_store_t *cs = ctx_store_open_path(canonical);
+    ASSERT_NOT_NULL(cs);
+    /* File-backed opens don't provision the Cortex-owned nodes/edges tables
+     * (Cortex normally owns that schema) — create them for this fixture. */
+    ASSERT_EQ(ctx_store_ensure_graph_schema(cs), CTX_STORE_OK);
+    ASSERT_EQ(ctx_store_upsert_project(cs, g_project, g_tmpdir), CTX_STORE_OK);
+    ctx_node_t marker = {.project = g_project,
+                         .label = "Function",
+                         .name = "__canonical_marker__",
+                         .qualified_name = "canonical.__canonical_marker__",
+                         .file_path = "canonical.py"};
+    ASSERT_TRUE(ctx_store_upsert_node(cs, &marker) >= 0);
+    ctx_store_close(cs);
+
+    ctx_setenv("CORTEX_DB", canonical, 1);
+    /* Fresh server — resolve_store caches the connection per project. */
+    ctx_mcp_server_t *srv = ctx_mcp_server_new(NULL);
+    if (!srv) {
+        ctx_unsetenv("CORTEX_DB");
+        unlink(canonical);
+        ASSERT_NOT_NULL(srv);
+    }
+
+    char args[768];
+    snprintf(args, sizeof(args),
+             "{\"query\":\"MATCH (n) WHERE n.name = '__canonical_marker__' RETURN n.name\","
+             "\"project\":\"%s\"}",
+             g_project);
+    char *resp = ctx_mcp_handle_tool(srv, "query_graph", args);
+    int marker_found = resp && strstr(resp, "__canonical_marker__") != NULL;
+    free(resp);
+    ctx_mcp_server_free(srv);
+
+    /* Fallback: a CORTEX_DB that lacks the project → cache still serves it. */
+    char other[512];
+    snprintf(other, sizeof(other), "%s/other.db", g_tmpdir);
+    unlink(other);
+    ctx_store_t *os = ctx_store_open_path(other); /* schema only, no project row */
+    int fallback_found = 0;
+    if (os) {
+        int schema_ok = ctx_store_ensure_graph_schema(os) == CTX_STORE_OK;
+        ctx_store_close(os);
+        if (schema_ok) {
+            ctx_setenv("CORTEX_DB", other, 1);
+            ctx_mcp_server_t *srv2 = ctx_mcp_server_new(NULL);
+            if (srv2) {
+                snprintf(args, sizeof(args),
+                         "{\"query\":\"MATCH (n) WHERE n.name = 'greet' RETURN n.name\","
+                         "\"project\":\"%s\"}",
+                         g_project);
+                resp = ctx_mcp_handle_tool(srv2, "query_graph", args);
+                fallback_found = resp && strstr(resp, "greet") != NULL;
+                free(resp);
+                ctx_mcp_server_free(srv2);
+            }
+        }
+    }
+
+    /* Cleanup BEFORE asserting — a leaked CORTEX_DB poisons every later test
+     * that resolves a DB path from the environment. */
+    ctx_unsetenv("CORTEX_DB");
+    unlink(canonical);
+    unlink(other);
+
+    ASSERT_TRUE(marker_found);
+    ASSERT_TRUE(fallback_found);
+    PASS();
+}
+
 TEST(integ_mcp_delete_project) {
     /* Delete the project and verify it's gone */
     char args[256];
@@ -566,7 +647,7 @@ SUITE(integration) {
     if (integration_setup() != 0) {
         printf("  %-50s", "integration_setup");
         printf("SKIP (setup failed)\n");
-        tf_skip_count += 17; /* skip all integration tests (match RUN_TEST count below) */
+        tf_skip_count += 18; /* skip all integration tests (match RUN_TEST count below) */
         integration_teardown();
         return;
     }
@@ -588,6 +669,7 @@ SUITE(integration) {
     RUN_TEST(integ_mcp_get_architecture);
     RUN_TEST(integ_mcp_trace_path);
     RUN_TEST(integ_mcp_index_status);
+    RUN_TEST(integ_query_graph_honors_cortex_db);
 
     /* Store query validation */
     RUN_TEST(integ_store_search_by_degree);

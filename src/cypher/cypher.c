@@ -1652,7 +1652,9 @@ static const char *node_prop(const ctx_node_t *n, const char *prop) {
     if (strcmp(prop, "qualified_name") == 0) {
         return n->qualified_name ? n->qualified_name : "";
     }
-    if (strcmp(prop, "label") == 0) {
+    /* "kind" is the column name in the SQL schema and the property name the
+     * MCP NodeSchema documents; the struct field is `label`. Accept both. */
+    if (strcmp(prop, "label") == 0 || strcmp(prop, "kind") == 0) {
         return n->label ? n->label : "";
     }
     if (strcmp(prop, "file_path") == 0) {

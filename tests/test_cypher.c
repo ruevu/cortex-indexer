@@ -535,6 +535,28 @@ TEST(cypher_exec_return_properties) {
     PASS();
 }
 
+/* `kind` is the property name Cortex's MCP surface documents for node type
+ * (NodeSchema in cortex's api-schemas.ts); the store column is `label`.
+ * Both spellings must resolve, in RETURN and in WHERE. Kinds are canonically
+ * lowercase in the store (D-m7y2), so that's the value compared/returned. */
+TEST(cypher_exec_kind_aliases_label) {
+    ctx_store_t *s = setup_cypher_store();
+    ctx_cypher_result_t r = {0};
+
+    int rc = ctx_cypher_execute(s,
+                                "MATCH (f) WHERE f.kind = \"function\" "
+                                "RETURN f.name, f.kind ORDER BY f.name LIMIT 1",
+                                "test", 0, &r);
+    ASSERT_EQ(rc, 0);
+    ASSERT_EQ(r.row_count, 1);
+    ASSERT_STR_EQ(r.rows[0][0], "HandleOrder");
+    ASSERT_STR_EQ(r.rows[0][1], "function");
+
+    ctx_cypher_result_free(&r);
+    ctx_store_close(s);
+    PASS();
+}
+
 TEST(cypher_exec_calls_relationship) {
     ctx_store_t *s = setup_cypher_store();
     ctx_cypher_result_t r = {0};
@@ -2089,6 +2111,7 @@ SUITE(cypher) {
     /* Execution */
     RUN_TEST(cypher_exec_match_all_functions);
     RUN_TEST(cypher_exec_where_eq);
+    RUN_TEST(cypher_exec_kind_aliases_label);
     RUN_TEST(cypher_exec_where_regex);
     RUN_TEST(cypher_exec_where_contains);
     RUN_TEST(cypher_exec_where_starts_with);
