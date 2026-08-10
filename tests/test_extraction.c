@@ -58,6 +58,16 @@ static int has_call(CtxFileResult *r, const char *callee) {
     return 0;
 }
 
+/* Return the enclosing_func_qn of the first call to the given callee. */
+static const char *call_scope_of(CtxFileResult *r, const char *callee) {
+    for (int i = 0; i < r->calls.count; i++) {
+        if (r->calls.items[i].callee_name &&
+            strcmp(r->calls.items[i].callee_name, callee) == 0)
+            return r->calls.items[i].enclosing_func_qn;
+    }
+    return NULL;
+}
+
 /* Check if any import with the given module path exists. */
 static int __attribute__((unused)) has_import(CtxFileResult *r, const char *path_substr) {
     for (int i = 0; i < r->imports.count; i++) {
@@ -2566,6 +2576,33 @@ TEST(nested_same_name_class_in_two_functions) {
     PASS();
 }
 
+TEST(nested_call_attributes_to_nested_fn) {
+    CtxFileResult *r = extract("export function callerOuter() {\n"
+                               "  targetAlpha();\n"
+                               "  const inner = () => { targetBeta(); };\n"
+                               "  inner();\n"
+                               "}\n",
+                               CTX_LANG_TYPESCRIPT, "t", "t.ts");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    ASSERT_STR_EQ(call_scope_of(r, "targetAlpha"), "t.t.callerOuter");
+    ASSERT_STR_EQ(call_scope_of(r, "targetBeta"), "t.t.callerOuter.inner");
+    ctx_free_result(r);
+    PASS();
+}
+
+TEST(nested_call_in_anonymous_cb_keeps_outer_scope) {
+    CtxFileResult *r = extract("export function outerCaller(items) {\n"
+                               "  items.forEach(x => { doThing(x); });\n"
+                               "}\n",
+                               CTX_LANG_TYPESCRIPT, "t", "cb.ts");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    ASSERT_STR_EQ(call_scope_of(r, "doThing"), "t.cb.outerCaller");
+    ctx_free_result(r);
+    PASS();
+}
+
 TEST(nested_anonymous_callback_makes_no_node) {
     CtxFileResult *r = extract("export function outerCb(items) {\n"
                                "  items.forEach(x => { doThing(x); });\n"
@@ -2890,6 +2927,8 @@ SUITE(extraction) {
     RUN_TEST(nested_ts_arrow_and_fn_decl);
     RUN_TEST(nested_same_name_in_two_functions);
     RUN_TEST(nested_same_name_class_in_two_functions);
+    RUN_TEST(nested_call_attributes_to_nested_fn);
+    RUN_TEST(nested_call_in_anonymous_cb_keeps_outer_scope);
     RUN_TEST(nested_anonymous_callback_makes_no_node);
     RUN_TEST(nested_in_method_body);
     RUN_TEST(nested_cpp_template_not_duplicated);

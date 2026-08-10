@@ -109,6 +109,9 @@ static const char *compute_func_qn(CtxExtractCtx *ctx, TSNode node, const CtxLan
         return NULL;
     }
 
+    if (state->enclosing_func_qn && state->enclosing_func_qn != ctx->module_qn) {
+        return ctx_fqn_scoped(ctx->arena, state->enclosing_func_qn, name);
+    }
     if (state->enclosing_class_qn) {
         return ctx_arena_sprintf(ctx->arena, "%s.%s", state->enclosing_class_qn, name);
     }
