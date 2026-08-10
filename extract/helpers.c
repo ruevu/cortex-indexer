@@ -772,6 +772,13 @@ char *ctx_fqn_compute(CtxArena *a, const char *project, const char *rel_path, co
     return buf;
 }
 
+char *ctx_fqn_scoped(CtxArena *a, const char *parent_qn, const char *name) {
+    if (!parent_qn || !name || !name[0]) {
+        return NULL;
+    }
+    return ctx_arena_sprintf(a, "%s.%s", parent_qn, name);
+}
+
 char *ctx_fqn_module(CtxArena *a, const char *project, const char *rel_path) {
     return ctx_fqn_compute(a, project, rel_path, NULL);
 }

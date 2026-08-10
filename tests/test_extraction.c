@@ -2503,6 +2503,63 @@ TEST(nested_method_qn_unchanged) {
     PASS();
 }
 
+TEST(nested_ts_arrow_and_fn_decl) {
+    CtxFileResult *r = extract("export function outerTs() {\n"
+                               "  const nestedArrowTs = () => 1;\n"
+                               "  function nestedFnDeclTs() { return 2; }\n"
+                               "  return nestedArrowTs() + nestedFnDeclTs();\n"
+                               "}\n",
+                               CTX_LANG_TYPESCRIPT, "t", "app.ts");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    ASSERT(has_def_qn(r, "Function", "t.app.outerTs.nestedArrowTs"));
+    ASSERT(has_def_qn(r, "Function", "t.app.outerTs.nestedFnDeclTs"));
+    ASSERT_STR_EQ(def_parent_of(r, "nestedArrowTs"), "t.app.outerTs");
+    ASSERT_STR_EQ(def_parent_of(r, "nestedFnDeclTs"), "t.app.outerTs");
+    ctx_free_result(r);
+    PASS();
+}
+
+TEST(nested_same_name_in_two_functions) {
+    CtxFileResult *r = extract("export function alpha() { const helper = () => 1; return helper(); }\n"
+                               "export function beta()  { const helper = () => 2; return helper(); }\n",
+                               CTX_LANG_TYPESCRIPT, "t", "k.ts");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    ASSERT(has_def_qn(r, "Function", "t.k.alpha.helper"));
+    ASSERT(has_def_qn(r, "Function", "t.k.beta.helper"));
+    ctx_free_result(r);
+    PASS();
+}
+
+TEST(nested_anonymous_callback_makes_no_node) {
+    CtxFileResult *r = extract("export function outerCb(items) {\n"
+                               "  items.forEach(x => { doThing(x); });\n"
+                               "}\n",
+                               CTX_LANG_TYPESCRIPT, "t", "cb.ts");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    ASSERT_EQ(count_defs_with_label(r, "Function"), 1);
+    ctx_free_result(r);
+    PASS();
+}
+
+TEST(nested_in_method_body) {
+    CtxFileResult *r = extract("class Klass {\n"
+                               "  start() {\n"
+                               "    const ensureChild = () => 1;\n"
+                               "    return ensureChild();\n"
+                               "  }\n"
+                               "}\n",
+                               CTX_LANG_TYPESCRIPT, "t", "app.ts");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    ASSERT(has_def_qn(r, "Function", "t.app.Klass.start.ensureChild"));
+    ASSERT_STR_EQ(def_parent_of(r, "ensureChild"), "t.app.Klass.start");
+    ctx_free_result(r);
+    PASS();
+}
+
 /* ═══════════════════════════════════════════════════════════════════
  * Suite
  * ═══════════════════════════════════════════════════════════════════ */
@@ -2664,6 +2721,10 @@ SUITE(extraction) {
     RUN_TEST(js_arrow_function);
     RUN_TEST(nested_toplevel_qn_unchanged);
     RUN_TEST(nested_method_qn_unchanged);
+    RUN_TEST(nested_ts_arrow_and_fn_decl);
+    RUN_TEST(nested_same_name_in_two_functions);
+    RUN_TEST(nested_anonymous_callback_makes_no_node);
+    RUN_TEST(nested_in_method_body);
 
     /* language_failures_test.go ports */
     RUN_TEST(commonlisp_defun);

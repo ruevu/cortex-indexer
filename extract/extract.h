@@ -382,6 +382,7 @@ typedef struct {
     TSNode root;
     EFCache ef_cache;                      // enclosing function cache
     const char *enclosing_class_qn;        // for nested class QN computation
+    const char *enclosing_func_qn;         // for nested function QN computation
     CtxStringConstantMap string_constants; // module-level NAME = "value" pairs
 } CtxExtractCtx;
 
