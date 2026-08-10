@@ -94,6 +94,7 @@ typedef struct {
     const char *receiver;      // Go method receiver (NULL if none)
     const char *docstring;     // leading doc comment (NULL if none)
     const char *parent_class;  // enclosing class QN for methods (NULL if none)
+    const char *parent_function; // enclosing function QN for nested defs (NULL if none)
     const char **decorators;   // NULL-terminated array (NULL if none)
     const char **base_classes; // NULL-terminated array (NULL if none)
     const char **param_names;  // NULL-terminated array (NULL if none)

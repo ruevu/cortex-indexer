@@ -28,6 +28,27 @@ static int has_def_any(CtxFileResult *r, const char *name) {
     return 0;
 }
 
+/* Check if any definition with the given label has the given qualified name. */
+static int has_def_qn(CtxFileResult *r, const char *label, const char *qn) {
+    for (int i = 0; i < r->defs.count; i++) {
+        if (strcmp(r->defs.items[i].label, label) == 0 &&
+            r->defs.items[i].qualified_name &&
+            strcmp(r->defs.items[i].qualified_name, qn) == 0)
+            return 1;
+    }
+    return 0;
+}
+
+/* Return the parent_function of the first def with the given short name.
+ * Returns NULL when the def is absent or is not nested. */
+static const char *def_parent_of(CtxFileResult *r, const char *name) {
+    for (int i = 0; i < r->defs.count; i++) {
+        if (strcmp(r->defs.items[i].name, name) == 0)
+            return r->defs.items[i].parent_function;
+    }
+    return NULL;
+}
+
 /* Check if any call to the given callee exists. */
 static int has_call(CtxFileResult *r, const char *callee) {
     for (int i = 0; i < r->calls.count; i++) {
@@ -2455,6 +2476,33 @@ TEST(python_regular_module_qn_unchanged) {
     PASS();
 }
 
+/* ── Nested definitions (spec 2026-08-10) ──────────────────────── */
+
+TEST(nested_toplevel_qn_unchanged) {
+    CtxFileResult *r = extract("export function outerTs() { return 1; }\n"
+                               "export const topArrowTs = () => 9;\n",
+                               CTX_LANG_TYPESCRIPT, "t", "app.ts");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    ASSERT(has_def_qn(r, "Function", "t.app.outerTs"));
+    ASSERT(has_def_qn(r, "Function", "t.app.topArrowTs"));
+    ASSERT_NULL(def_parent_of(r, "outerTs"));
+    ASSERT_NULL(def_parent_of(r, "topArrowTs"));
+    ctx_free_result(r);
+    PASS();
+}
+
+TEST(nested_method_qn_unchanged) {
+    CtxFileResult *r = extract("class Klass { start() { return 1; } }\n",
+                               CTX_LANG_TYPESCRIPT, "t", "app.ts");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    ASSERT(has_def_qn(r, "Method", "t.app.Klass.start"));
+    ASSERT_NULL(def_parent_of(r, "start"));
+    ctx_free_result(r);
+    PASS();
+}
+
 /* ═══════════════════════════════════════════════════════════════════
  * Suite
  * ═══════════════════════════════════════════════════════════════════ */
@@ -2614,6 +2662,8 @@ SUITE(extraction) {
     RUN_TEST(python_docstring);
     RUN_TEST(go_function_extraction);
     RUN_TEST(js_arrow_function);
+    RUN_TEST(nested_toplevel_qn_unchanged);
+    RUN_TEST(nested_method_qn_unchanged);
 
     /* language_failures_test.go ports */
     RUN_TEST(commonlisp_defun);
