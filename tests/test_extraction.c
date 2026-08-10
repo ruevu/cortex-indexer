@@ -901,6 +901,22 @@ TEST(cpp_function) {
     PASS();
 }
 
+/* --- C++ template function: must not be double-extracted (spec 2026-08-10) ---
+ * template_declaration and its inner function_definition are both in
+ * cpp_func_types, so walking into the wrapper's own children (instead of
+ * the unwrapped inner function's children) re-visits and re-extracts the
+ * inner function_definition as a bogus nested duplicate ("add.add"). */
+TEST(nested_cpp_template_not_duplicated) {
+    CtxFileResult *r = extract("template<typename T> T add(T a, T b) { return a + b; }\n",
+                               CTX_LANG_CPP, "t", "t2.cpp");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    ASSERT_EQ(count_defs_with_label(r, "Function"), 1);
+    ASSERT(has_def_qn(r, "Function", "t.t2.add"));
+    ctx_free_result(r);
+    PASS();
+}
+
 /* --- COBOL paragraph --- */
 TEST(cobol_paragraph) {
     CtxFileResult *r =
@@ -2578,6 +2594,26 @@ TEST(nested_in_method_body) {
     PASS();
 }
 
+TEST(nested_deep_nesting_no_stack_overflow) {
+    /* 100 levels of nested named functions. The pre-fix implementation
+     * allocated a 192 KiB frame array per level and overflowed the 8 MB
+     * thread stack at ~42 levels. */
+    enum { DEPTH = 100 };
+    char src[DEPTH * 64 + 64];
+    int pos = 0;
+    for (int i = 0; i < DEPTH; i++)
+        pos += snprintf(src + pos, sizeof(src) - (size_t)pos, "function L%d() {\n", i);
+    for (int i = 0; i < DEPTH; i++)
+        pos += snprintf(src + pos, sizeof(src) - (size_t)pos, "}\n");
+
+    CtxFileResult *r = extract(src, CTX_LANG_TYPESCRIPT, "t", "deep.ts");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    ASSERT_EQ(count_defs_with_label(r, "Function"), DEPTH);
+    ctx_free_result(r);
+    PASS();
+}
+
 /* ═══════════════════════════════════════════════════════════════════
  * Suite
  * ═══════════════════════════════════════════════════════════════════ */
@@ -2744,6 +2780,8 @@ SUITE(extraction) {
     RUN_TEST(nested_same_name_class_in_two_functions);
     RUN_TEST(nested_anonymous_callback_makes_no_node);
     RUN_TEST(nested_in_method_body);
+    RUN_TEST(nested_cpp_template_not_duplicated);
+    RUN_TEST(nested_deep_nesting_no_stack_overflow);
 
     /* language_failures_test.go ports */
     RUN_TEST(commonlisp_defun);
