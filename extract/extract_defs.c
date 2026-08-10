@@ -8,6 +8,7 @@
 #include "semantic/ast_profile.h"
 #include "tree_sitter/api.h" // TSNode, ts_node_*
 #include <stdint.h>          // uint32_t
+#include <stdlib.h>          // malloc, free
 #include <string.h>
 #include <ctype.h>
 
@@ -1834,10 +1835,15 @@ static void extract_class_def(CtxExtractCtx *ctx, TSNode node, const CtxLangSpec
         return;
     }
 
-    // For nested classes, prefix with enclosing class QN (e.g., Outer.Inner)
+    // For nested classes, prefix with enclosing class QN (e.g., Outer.Inner).
+    // A class declared inside a function/method body (no enclosing class)
+    // chains onto the enclosing function scope instead, so same-named local
+    // classes in different functions don't collide on a flat module QN.
     const char *class_qn;
     if (ctx->enclosing_class_qn) {
         class_qn = ctx_arena_sprintf(a, "%s.%s", ctx->enclosing_class_qn, name);
+    } else if (ctx->enclosing_func_qn) {
+        class_qn = ctx_fqn_scoped(a, ctx->enclosing_func_qn, name);
     } else {
         class_qn = ctx_fqn_compute(a, ctx->project, ctx->rel_path, name);
     }
@@ -3243,10 +3249,16 @@ static const char *compute_class_qn(CtxExtractCtx *ctx, TSNode node, const char 
             if (saved_enclosing) {
                 return ctx_arena_sprintf(ctx->arena, "%s.%s", saved_enclosing, cname);
             }
+            // No enclosing class: a class local to a function/method body
+            // chains onto that function's scope instead of falling straight
+            // to a flat module QN (mirrors extract_class_def's fallback).
+            if (ctx->enclosing_func_qn) {
+                return ctx_fqn_scoped(ctx->arena, ctx->enclosing_func_qn, cname);
+            }
             return ctx_fqn_compute(ctx->arena, ctx->project, ctx->rel_path, cname);
         }
     }
-    return saved_enclosing;
+    return saved_enclosing ? saved_enclosing : ctx->enclosing_func_qn;
 }
 
 // Push nested class children from a class body container onto the walk stack.
@@ -3271,8 +3283,11 @@ static void push_class_body_children(TSNode node, const CtxLangSpec *spec, walk_
 }
 
 // Walk a callable's body for nested definitions, scoped to owner_qn.
-// Saves and restores ctx scope so callers are unaffected. Recursion depth
-// tracks source nesting depth (typically 2-3), well within the 8 MB stacks.
+// Saves and restores ctx scope so callers are unaffected. Recurses into
+// walk_defs once per source nesting level; walk_defs heap-allocates its
+// frame stack rather than putting it on the C stack, so this recursion's
+// C-stack cost per level is a few words, not CTX_WALK_DEFS_STACK_CAP frames
+// — nesting depth here is unbounded by design (no depth cap).
 static void walk_nested_defs(CtxExtractCtx *ctx, TSNode owner_node, const CtxLangSpec *spec,
                              const char *owner_qn) {
     if (!owner_qn) {
@@ -3291,7 +3306,18 @@ static void walk_nested_defs(CtxExtractCtx *ctx, TSNode owner_node, const CtxLan
 
 static void walk_defs(CtxExtractCtx *ctx, TSNode root, const CtxLangSpec *spec, int depth_unused) {
     (void)depth_unused;
-    walk_defs_frame_t stack[CTX_WALK_DEFS_STACK_CAP];
+    // Heap-allocated, not a C-stack array: walk_nested_defs recurses into
+    // walk_defs once per source function/method nesting level, and nesting
+    // depth is intentionally unbounded (no depth cap). A stack-local
+    // CTX_WALK_DEFS_STACK_CAP-entry array here would cost ~192 KiB of
+    // C-stack per recursion level, exhausting an 8 MB thread stack after a
+    // few dozen levels; heap allocation makes the per-level C-stack cost a
+    // single pointer instead.
+    walk_defs_frame_t *stack =
+        (walk_defs_frame_t *)malloc(CTX_WALK_DEFS_STACK_CAP * sizeof(walk_defs_frame_t));
+    if (!stack) {
+        return;
+    }
     int top = 0;
     stack[top++] = (walk_defs_frame_t){root, ctx->enclosing_class_qn, ctx->enclosing_func_qn};
 
@@ -3315,7 +3341,14 @@ static void walk_defs(CtxExtractCtx *ctx, TSNode root, const CtxLangSpec *spec, 
                     // An unnamed function yields no QN — its children inherit
                     // this frame's scope, matching how the unified walker in
                     // extract_unified.c treats unnameable functions.
-                    walk_nested_defs(ctx, node, spec,
+                    // Descend from the unwrapped inner function, not `node`
+                    // itself: for C++/CUDA, `node` may be a template_declaration
+                    // wrapper whose child function_definition also matches
+                    // spec->function_node_types — walking the wrapper's own
+                    // children would re-visit and re-extract that same
+                    // function_definition as a nested duplicate. unwrap_template_inner
+                    // is a no-op for every other case (returns node unchanged).
+                    walk_nested_defs(ctx, unwrap_template_inner(node, ctx->language), spec,
                                      fn_qn ? fn_qn : frame.enclosing_func_qn);
                     continue;
                 }
@@ -3352,6 +3385,7 @@ static void walk_defs(CtxExtractCtx *ctx, TSNode root, const CtxLangSpec *spec, 
                                                frame.enclosing_func_qn};
         }
     }
+    free(stack);
 }
 
 void ctx_extract_definitions(CtxExtractCtx *ctx) {

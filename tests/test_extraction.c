@@ -2532,6 +2532,24 @@ TEST(nested_same_name_in_two_functions) {
     PASS();
 }
 
+TEST(nested_same_name_class_in_two_functions) {
+    CtxFileResult *r = extract("export function outer() {\n"
+                               "  class Local { m() { return 1; } }\n"
+                               "  return new Local().m();\n"
+                               "}\n"
+                               "export function outer2() {\n"
+                               "  class Local { m() { return 2; } }\n"
+                               "  return new Local().m();\n"
+                               "}\n",
+                               CTX_LANG_TYPESCRIPT, "t", "dup.ts");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    ASSERT(has_def_qn(r, "Class", "t.dup.outer.Local"));
+    ASSERT(has_def_qn(r, "Class", "t.dup.outer2.Local"));
+    ctx_free_result(r);
+    PASS();
+}
+
 TEST(nested_anonymous_callback_makes_no_node) {
     CtxFileResult *r = extract("export function outerCb(items) {\n"
                                "  items.forEach(x => { doThing(x); });\n"
@@ -2723,6 +2741,7 @@ SUITE(extraction) {
     RUN_TEST(nested_method_qn_unchanged);
     RUN_TEST(nested_ts_arrow_and_fn_decl);
     RUN_TEST(nested_same_name_in_two_functions);
+    RUN_TEST(nested_same_name_class_in_two_functions);
     RUN_TEST(nested_anonymous_callback_makes_no_node);
     RUN_TEST(nested_in_method_body);
 
