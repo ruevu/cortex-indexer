@@ -494,14 +494,30 @@ static const char *func_node_name(CtxArena *a, TSNode func_node, const char *sou
 static const char *ctx_func_scope_qn(CtxArena *a, TSNode func_node, const char *name,
                                      CtxLanguage lang, const char *source, const char *project,
                                      const char *rel_path, const char *module_qn) {
-    TSNode outer = ctx_find_enclosing_func(func_node, lang);
-    if (!ts_node_is_null(outer)) {
+    // Ascend past any unnamed enclosing callables instead of stopping at the
+    // first one and falling through to the class/flat fallback below. For
+    // `outer(){ arr.forEach(() => { function deep(){} }) }`, the nearest
+    // enclosing callable to `deep` is the anonymous arrow — stopping there
+    // (as this loop used to) discards `outer` entirely and yields a flat
+    // `deep`, where both the live WalkState walker and walk_defs correctly
+    // yield `outer.deep`. WalkState achieves this by simply never pushing a
+    // scope for an unnamed function, so enclosing_func_qn transparently
+    // skips over it to whatever named scope was active before it; this loop
+    // mirrors that by continuing the ascent from each unnamed callable
+    // instead of returning at it.
+    TSNode outer = func_node;
+    for (;;) {
+        outer = ctx_find_enclosing_func(outer, lang);
+        if (ts_node_is_null(outer)) {
+            break;
+        }
         const char *outer_name = func_node_name(a, outer, source, lang);
         if (outer_name && outer_name[0]) {
             const char *outer_qn = ctx_func_scope_qn(a, outer, outer_name, lang, source, project,
                                                       rel_path, module_qn);
             return ctx_fqn_scoped(a, outer_qn, name);
         }
+        // outer is unnamed -- keep ascending from it rather than giving up.
     }
 
     const CtxLangSpec *spec = ctx_lang_spec(lang);

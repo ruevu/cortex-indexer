@@ -2603,6 +2603,41 @@ TEST(nested_call_in_anonymous_cb_keeps_outer_scope) {
     PASS();
 }
 
+TEST(nested_call_in_class_nested_in_function_chains_fully) {
+    /* class Local nested inside function outer(), method m() inside Local.
+     * The innermost enclosing scope for a call in m() is Local (a class),
+     * not outer() (a function) -- compute_func_qn/compute_class_qn must pick
+     * whichever is actually nearer by depth, not let function scope always
+     * win over class scope. */
+    CtxFileResult *r = extract("export function outer() {\n"
+                               "  class Local {\n"
+                               "    m() { target(); }\n"
+                               "  }\n"
+                               "}\n",
+                               CTX_LANG_TYPESCRIPT, "t", "f.ts");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    ASSERT_STR_EQ(call_scope_of(r, "target"), "t.f.outer.Local.m");
+    ctx_free_result(r);
+    PASS();
+}
+
+TEST(nested_call_in_class_nested_in_class_chains_fully) {
+    /* class Inner nested inside class Outer (no function involved at all) --
+     * compute_class_qn must chain a class onto its enclosing class scope
+     * instead of always falling flat to the module QN. */
+    CtxFileResult *r = extract("class Outer:\n"
+                               "    class Inner:\n"
+                               "        def m(self):\n"
+                               "            target()\n",
+                               CTX_LANG_PYTHON, "t", "n.py");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    ASSERT_STR_EQ(call_scope_of(r, "target"), "t.n.Outer.Inner.m");
+    ctx_free_result(r);
+    PASS();
+}
+
 TEST(nested_anonymous_callback_makes_no_node) {
     CtxFileResult *r = extract("export function outerCb(items) {\n"
                                "  items.forEach(x => { doThing(x); });\n"
@@ -2929,6 +2964,8 @@ SUITE(extraction) {
     RUN_TEST(nested_same_name_class_in_two_functions);
     RUN_TEST(nested_call_attributes_to_nested_fn);
     RUN_TEST(nested_call_in_anonymous_cb_keeps_outer_scope);
+    RUN_TEST(nested_call_in_class_nested_in_function_chains_fully);
+    RUN_TEST(nested_call_in_class_nested_in_class_chains_fully);
     RUN_TEST(nested_anonymous_callback_makes_no_node);
     RUN_TEST(nested_in_method_body);
     RUN_TEST(nested_cpp_template_not_duplicated);
