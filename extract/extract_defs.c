@@ -545,32 +545,56 @@ static TSNode resolve_toplevel_arrow_name(TSNode node, const char *kind) {
 // right: expression_list{func_literal}} — the literal's direct parent is the
 // right-hand expression_list, so we unwrap one level before checking for the
 // declaration/assignment shape.
+//
+// Multi-value declarations (`a, b := func(){...}, func(){...}`) put more than
+// one closure in that right-hand expression_list, each paired positionally
+// with the matching left-hand identifier — the closure at RHS index i names
+// itself from the LHS identifier at the same index i, not always index 0.
+// We only trust that pairing when the left/right counts line up 1:1; if they
+// don't (or the node's own position can't be found), we return a null node
+// rather than guess — an unnamed closure degrades safely (no def emitted),
+// but a wrongly-named one pollutes the graph with a bad QN.
 static TSNode resolve_go_closure_name(TSNode node) {
+    TSNode null_node = {0};
     TSNode parent = ts_node_parent(node);
     if (ts_node_is_null(parent)) {
-        TSNode null_node = {0};
         return null_node;
     }
     const char *pk = ts_node_type(parent);
-    if (strcmp(pk, "expression_list") == 0) {
-        parent = ts_node_parent(parent);
-        if (ts_node_is_null(parent)) {
-            TSNode null_node = {0};
-            return null_node;
-        }
-        pk = ts_node_type(parent);
+    if (strcmp(pk, "expression_list") != 0) {
+        return null_node;
     }
-    if (strcmp(pk, "short_var_declaration") == 0 || strcmp(pk, "assignment_statement") == 0) {
-        TSNode left = ts_node_child_by_field_name(parent, TS_FIELD("left"));
-        if (!ts_node_is_null(left) && ts_node_named_child_count(left) > 0) {
-            return ts_node_named_child(left, 0);
-        }
-        if (!ts_node_is_null(left)) {
-            return left;
+    TSNode rhs_list = parent;
+    int rhs_index = -1;
+    uint32_t rc = ts_node_named_child_count(rhs_list);
+    for (uint32_t i = 0; i < rc; i++) {
+        if (ts_node_eq(ts_node_named_child(rhs_list, i), node)) {
+            rhs_index = (int)i;
+            break;
         }
     }
-    TSNode null_node = {0};
-    return null_node;
+    if (rhs_index < 0) {
+        return null_node;
+    }
+
+    parent = ts_node_parent(rhs_list);
+    if (ts_node_is_null(parent)) {
+        return null_node;
+    }
+    pk = ts_node_type(parent);
+    if (strcmp(pk, "short_var_declaration") != 0 && strcmp(pk, "assignment_statement") != 0) {
+        return null_node;
+    }
+
+    TSNode left = ts_node_child_by_field_name(parent, TS_FIELD("left"));
+    if (ts_node_is_null(left)) {
+        return null_node;
+    }
+    uint32_t lc = ts_node_named_child_count(left);
+    if (lc != rc || (uint32_t)rhs_index >= lc) {
+        return null_node;
+    }
+    return ts_node_named_child(left, (uint32_t)rhs_index);
 }
 
 // Try C/C++/CUDA/GLSL function_definition declarator name or template unwrap.

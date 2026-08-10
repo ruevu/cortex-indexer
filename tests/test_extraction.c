@@ -2641,6 +2641,21 @@ TEST(nested_go_closure) {
     PASS();
 }
 
+TEST(nested_go_multi_assign_closures_named_distinctly) {
+    CtxFileResult *r = extract("package main\n\n"
+                               "func Outer() {\n"
+                               "\ta, b := func() int { return 1 }, func() int { return 2 }\n"
+                               "\t_ = a\n\t_ = b\n"
+                               "}\n",
+                               CTX_LANG_GO, "t", "m.go");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    ASSERT(has_def_qn(r, "Function", "t.m.Outer.a"));
+    ASSERT(has_def_qn(r, "Function", "t.m.Outer.b"));
+    ctx_free_result(r);
+    PASS();
+}
+
 TEST(nested_rust_fn) {
     CtxFileResult *r = extract("pub fn outer_rs() -> i32 {\n"
                                "    fn nested_fn_rs() -> i32 { 1 }\n"
@@ -2881,6 +2896,7 @@ SUITE(extraction) {
     RUN_TEST(nested_deep_nesting_no_stack_overflow);
     RUN_TEST(nested_python_def);
     RUN_TEST(nested_go_closure);
+    RUN_TEST(nested_go_multi_assign_closures_named_distinctly);
     RUN_TEST(nested_rust_fn);
     RUN_TEST(nested_ruby_def);
     RUN_TEST(nested_php_function);
