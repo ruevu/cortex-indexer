@@ -540,6 +540,39 @@ static TSNode resolve_toplevel_arrow_name(TSNode node, const char *kind) {
     return null_node;
 }
 
+// Go: resolve func_literal name from parent short_var_declaration/assignment.
+// `x := func() {...}` parses as short_var_declaration{left: expression_list,
+// right: expression_list{func_literal}} — the literal's direct parent is the
+// right-hand expression_list, so we unwrap one level before checking for the
+// declaration/assignment shape.
+static TSNode resolve_go_closure_name(TSNode node) {
+    TSNode parent = ts_node_parent(node);
+    if (ts_node_is_null(parent)) {
+        TSNode null_node = {0};
+        return null_node;
+    }
+    const char *pk = ts_node_type(parent);
+    if (strcmp(pk, "expression_list") == 0) {
+        parent = ts_node_parent(parent);
+        if (ts_node_is_null(parent)) {
+            TSNode null_node = {0};
+            return null_node;
+        }
+        pk = ts_node_type(parent);
+    }
+    if (strcmp(pk, "short_var_declaration") == 0 || strcmp(pk, "assignment_statement") == 0) {
+        TSNode left = ts_node_child_by_field_name(parent, TS_FIELD("left"));
+        if (!ts_node_is_null(left) && ts_node_named_child_count(left) > 0) {
+            return ts_node_named_child(left, 0);
+        }
+        if (!ts_node_is_null(left)) {
+            return left;
+        }
+    }
+    TSNode null_node = {0};
+    return null_node;
+}
+
 // Try C/C++/CUDA/GLSL function_definition declarator name or template unwrap.
 static TSNode resolve_func_name_c_family(TSNode *node_ptr, CtxLanguage lang, const char *kind) {
     if ((lang == CTX_LANG_CPP || lang == CTX_LANG_CUDA) &&
@@ -591,6 +624,12 @@ static TSNode resolve_func_name(TSNode node, CtxLanguage lang) {
 
         {
             TSNode r = resolve_toplevel_arrow_name(node, kind);
+            if (!ts_node_is_null(r)) {
+                return r;
+            }
+        }
+        if (lang == CTX_LANG_GO && strcmp(kind, "func_literal") == 0) {
+            TSNode r = resolve_go_closure_name(node);
             if (!ts_node_is_null(r)) {
                 return r;
             }

@@ -2614,6 +2614,103 @@ TEST(nested_deep_nesting_no_stack_overflow) {
     PASS();
 }
 
+TEST(nested_python_def) {
+    CtxFileResult *r = extract("def outer_py():\n"
+                               "    def nested_def_py():\n"
+                               "        return 1\n"
+                               "    return nested_def_py()\n",
+                               CTX_LANG_PYTHON, "t", "b.py");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    ASSERT(has_def_qn(r, "Function", "t.b.outer_py.nested_def_py"));
+    ctx_free_result(r);
+    PASS();
+}
+
+TEST(nested_go_closure) {
+    CtxFileResult *r = extract("package main\n\n"
+                               "func OuterGo() int {\n"
+                               "\tnestedClosureGo := func() int { return 1 }\n"
+                               "\treturn nestedClosureGo()\n"
+                               "}\n",
+                               CTX_LANG_GO, "t", "c.go");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    ASSERT(has_def_qn(r, "Function", "t.c.OuterGo.nestedClosureGo"));
+    ctx_free_result(r);
+    PASS();
+}
+
+TEST(nested_rust_fn) {
+    CtxFileResult *r = extract("pub fn outer_rs() -> i32 {\n"
+                               "    fn nested_fn_rs() -> i32 { 1 }\n"
+                               "    nested_fn_rs()\n"
+                               "}\n",
+                               CTX_LANG_RUST, "t", "d.rs");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    ASSERT(has_def_qn(r, "Function", "t.d.outer_rs.nested_fn_rs"));
+    ctx_free_result(r);
+    PASS();
+}
+
+TEST(nested_ruby_def) {
+    CtxFileResult *r = extract("def outer_rb\n"
+                               "  def nested_def_rb\n"
+                               "    1\n"
+                               "  end\n"
+                               "  nested_def_rb\n"
+                               "end\n",
+                               CTX_LANG_RUBY, "t", "e.rb");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    ASSERT(has_def_qn(r, "Function", "t.e.outer_rb.nested_def_rb"));
+    ctx_free_result(r);
+    PASS();
+}
+
+TEST(nested_php_function) {
+    CtxFileResult *r = extract("<?php\n"
+                               "function outer_php() {\n"
+                               "    function nested_fn_php() { return 1; }\n"
+                               "    return nested_fn_php();\n"
+                               "}\n",
+                               CTX_LANG_PHP, "t", "g.php");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    ASSERT(has_def_qn(r, "Function", "t.g.outer_php.nested_fn_php"));
+    ctx_free_result(r);
+    PASS();
+}
+
+TEST(nested_tsx_handler) {
+    CtxFileResult *r = extract("export function CompTsx() {\n"
+                               "  const handleClickTsx = () => {};\n"
+                               "  return null;\n"
+                               "}\n",
+                               CTX_LANG_TSX, "t", "h.tsx");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    ASSERT(has_def_qn(r, "Function", "t.h.CompTsx.handleClickTsx"));
+    ctx_free_result(r);
+    PASS();
+}
+
+TEST(nested_java_local_class) {
+    CtxFileResult *r = extract("public class KlassJava {\n"
+                               "  public int methodJava() {\n"
+                               "    class LocalKlassJava { int v() { return 1; } }\n"
+                               "    return new LocalKlassJava().v();\n"
+                               "  }\n"
+                               "}\n",
+                               CTX_LANG_JAVA, "t", "f.java");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    ASSERT(has_def_any(r, "LocalKlassJava"));
+    ctx_free_result(r);
+    PASS();
+}
+
 /* ═══════════════════════════════════════════════════════════════════
  * Suite
  * ═══════════════════════════════════════════════════════════════════ */
@@ -2782,6 +2879,13 @@ SUITE(extraction) {
     RUN_TEST(nested_in_method_body);
     RUN_TEST(nested_cpp_template_not_duplicated);
     RUN_TEST(nested_deep_nesting_no_stack_overflow);
+    RUN_TEST(nested_python_def);
+    RUN_TEST(nested_go_closure);
+    RUN_TEST(nested_rust_fn);
+    RUN_TEST(nested_ruby_def);
+    RUN_TEST(nested_php_function);
+    RUN_TEST(nested_tsx_handler);
+    RUN_TEST(nested_java_local_class);
 
     /* language_failures_test.go ports */
     RUN_TEST(commonlisp_defun);
