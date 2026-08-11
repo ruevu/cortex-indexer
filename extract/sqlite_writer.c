@@ -18,6 +18,7 @@
 #include "foundation/constants.h"
 #include "foundation/compat_thread.h"
 #include "foundation/profile.h"
+#include "store/store.h" /* CTX_EXTRACT_SCHEMA — single source of truth, shared with store.c's DDL */
 
 #include <stddef.h> // NULL
 #include <stdio.h>
@@ -834,15 +835,16 @@ static uint8_t *build_token_vec_record(const CtxDumpTokenVec *tv, int *out_len) 
     return data;
 }
 
-// Build a projects table record: (name, indexed_at, root_path)
+// Build a projects table record: (name, indexed_at, root_path, extract_schema)
 static uint8_t *build_project_record(const char *name, const char *indexed_at,
-                                     const char *root_path, int *out_len) {
+                                     const char *root_path, int extract_schema, int *out_len) {
     RecordBuilder r;
     rec_init(&r);
 
     rec_add_text(&r, name);
     rec_add_text(&r, indexed_at);
     rec_add_text(&r, root_path);
+    rec_add_int(&r, extract_schema);
 
     uint8_t *data = rec_finalize(&r, out_len);
     rec_free(&r);
@@ -1586,8 +1588,8 @@ static void write_metadata_tables(write_db_ctx_t *w, uint32_t *projects_root,
                                   uint32_t *file_hashes_root, uint32_t *summaries_root,
                                   uint32_t *sqlite_seq_root) {
     int proj_rec_len;
-    uint8_t *proj_rec =
-        build_project_record(w->project, w->indexed_at, w->root_path, &proj_rec_len);
+    uint8_t *proj_rec = build_project_record(w->project, w->indexed_at, w->root_path,
+                                             CTX_EXTRACT_SCHEMA, &proj_rec_len);
     const uint8_t *proj_recs[] = {proj_rec};
     int proj_lens[] = {proj_rec_len};
     int64_t proj_rowids[] = {FIRST_ROWID};
@@ -2035,7 +2037,8 @@ int ctx_write_db(const char *path, const char *project, const char *root_path,
         /* Indexer-owned bookkeeping tables (formerly ctx_*). */
         {"table", "ctx_projects", "ctx_projects", projects_root,
          "CREATE TABLE ctx_projects (\n\t\tname TEXT PRIMARY KEY,\n\t\tindexed_at TEXT NOT "
-         "NULL,\n\t\troot_path TEXT NOT NULL\n\t)"},
+         "NULL,\n\t\troot_path TEXT NOT NULL,\n\t\textract_schema INTEGER NOT NULL DEFAULT "
+         "0\n\t)"},
         {"index", "sqlite_autoindex_ctx_projects_1", "ctx_projects", autoindex_projects_root, NULL},
         {"table", "ctx_file_hashes", "ctx_file_hashes", file_hashes_root,
          "CREATE TABLE ctx_file_hashes (\n\t\tproject TEXT NOT NULL REFERENCES ctx_projects(name) "

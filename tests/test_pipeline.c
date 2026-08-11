@@ -306,6 +306,36 @@ TEST(pipeline_structure_edges) {
     PASS();
 }
 
+/* Regression guard (spec 2026-08-10 Task 6 fix, round 1): a full index goes
+ * through the bulk sqlite_writer.c B-tree path (ctx_gbuf_dump_to_sqlite →
+ * ctx_write_db), NOT ctx_store_upsert_project — a unit test against an
+ * in-memory store cannot see this path at all. Without the stamp landing
+ * here, every fresh index permanently disables incremental indexing
+ * (stored=0 forever mismatches CTX_EXTRACT_SCHEMA). */
+TEST(pipeline_full_index_stamps_extract_schema) {
+    if (setup_test_repo() != 0) {
+        SKIP("failed to create temp dir");
+    }
+
+    char db_path[512];
+    snprintf(db_path, sizeof(db_path), "%s/test_schema_stamp.db", g_tmpdir);
+
+    ctx_pipeline_t *p = ctx_pipeline_new(g_tmpdir, db_path, CTX_MODE_FULL);
+    ASSERT_NOT_NULL(p);
+    int rc = ctx_pipeline_run(p);
+    ASSERT_EQ(rc, 0);
+
+    ctx_store_t *s = ctx_store_open_path(db_path);
+    ASSERT_NOT_NULL(s);
+    const char *project = ctx_pipeline_project_name(p);
+    ASSERT_EQ(ctx_store_get_extract_schema(s, project), CTX_EXTRACT_SCHEMA);
+
+    ctx_store_close(s);
+    ctx_pipeline_free(p);
+    teardown_test_repo();
+    PASS();
+}
+
 TEST(pipeline_project_name_derived) {
     if (setup_test_repo() != 0) {
         SKIP("failed to create temp dir");
@@ -5259,6 +5289,7 @@ SUITE(pipeline) {
     /* Integration: structure pass */
     RUN_TEST(pipeline_structure_nodes);
     RUN_TEST(pipeline_structure_edges);
+    RUN_TEST(pipeline_full_index_stamps_extract_schema);
     RUN_TEST(pipeline_project_name_derived);
     RUN_TEST(pipeline_fast_mode);
     /* Definitions pass */

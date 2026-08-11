@@ -111,6 +111,36 @@ TEST(store_project_delete) {
     PASS();
 }
 
+/* ── Extraction-schema stamping (spec 2026-08-10) ───────────────── */
+
+TEST(store_extract_schema_stamped_on_upsert) {
+    ctx_store_t *s = ctx_store_open_memory();
+    ASSERT_NOT_NULL(s);
+    ASSERT_EQ(ctx_store_upsert_project(s, "p", "/tmp/p"), CTX_STORE_OK);
+    ASSERT_EQ(ctx_store_get_extract_schema(s, "p"), CTX_EXTRACT_SCHEMA);
+    ctx_store_close(s);
+    PASS();
+}
+
+TEST(store_extract_schema_defaults_to_zero_for_legacy_rows) {
+    ctx_store_t *s = ctx_store_open_memory();
+    ASSERT_NOT_NULL(s);
+    ASSERT_EQ(ctx_store_upsert_project(s, "p", "/tmp/p"), CTX_STORE_OK);
+    /* Simulate a DB written by a pre-nested-defs indexer. */
+    ASSERT_EQ(ctx_store_exec(s, "UPDATE ctx_projects SET extract_schema = 0;"), CTX_STORE_OK);
+    ASSERT_EQ(ctx_store_get_extract_schema(s, "p"), 0);
+    ctx_store_close(s);
+    PASS();
+}
+
+TEST(store_extract_schema_absent_project_reads_zero) {
+    ctx_store_t *s = ctx_store_open_memory();
+    ASSERT_NOT_NULL(s);
+    ASSERT_EQ(ctx_store_get_extract_schema(s, "no-such-project"), 0);
+    ctx_store_close(s);
+    PASS();
+}
+
 /* ── Node CRUD ──────────────────────────────────────────────────── */
 
 TEST(store_node_crud) {
@@ -1518,6 +1548,9 @@ SUITE(store_nodes) {
     RUN_TEST(store_project_crud);
     RUN_TEST(store_project_update);
     RUN_TEST(store_project_delete);
+    RUN_TEST(store_extract_schema_stamped_on_upsert);
+    RUN_TEST(store_extract_schema_defaults_to_zero_for_legacy_rows);
+    RUN_TEST(store_extract_schema_absent_project_reads_zero);
     RUN_TEST(store_node_crud);
     RUN_TEST(store_node_dedup);
     RUN_TEST(store_node_find_by_label);

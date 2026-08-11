@@ -273,7 +273,8 @@ static int init_schema(ctx_store_t *s) {
     const char *ddl = "CREATE TABLE IF NOT EXISTS ctx_projects ("
                       "  name TEXT PRIMARY KEY,"
                       "  indexed_at TEXT NOT NULL,"
-                      "  root_path TEXT NOT NULL"
+                      "  root_path TEXT NOT NULL,"
+                      "  extract_schema INTEGER NOT NULL DEFAULT 0"
                       ");"
                       "CREATE TABLE IF NOT EXISTS ctx_file_hashes ("
                       "  project TEXT NOT NULL REFERENCES ctx_projects(name) ON DELETE CASCADE,"
@@ -295,6 +296,10 @@ static int init_schema(ctx_store_t *s) {
     if (rc != CTX_STORE_OK) {
         return rc;
     }
+
+    /* Idempotent: pre-existing DBs lack the column. A duplicate-column error
+     * means it is already present, which is not a failure. */
+    exec_sql(s, "ALTER TABLE ctx_projects ADD COLUMN extract_schema INTEGER NOT NULL DEFAULT 0;");
 
     /* FTS5 contentless virtual table for BM25 full-text search.
      * Now stores `kind` (was `label` pre-Phase-4) since the schema fold
@@ -973,10 +978,11 @@ int ctx_store_dump_to_file(ctx_store_t *s, const char *dest_path) {
 /* ── Project CRUD ───────────────────────────────────────────────── */
 
 int ctx_store_upsert_project(ctx_store_t *s, const char *name, const char *root_path) {
-    sqlite3_stmt *stmt =
-        prepare_cached(s, &s->stmt_upsert_project,
-                       "INSERT INTO ctx_projects (name, indexed_at, root_path) VALUES (?1, ?2, ?3) "
-                       "ON CONFLICT(name) DO UPDATE SET indexed_at=?2, root_path=?3;");
+    sqlite3_stmt *stmt = prepare_cached(
+        s, &s->stmt_upsert_project,
+        "INSERT INTO ctx_projects (name, indexed_at, root_path, extract_schema) "
+        "VALUES (?1, ?2, ?3, ?4) "
+        "ON CONFLICT(name) DO UPDATE SET indexed_at=?2, root_path=?3, extract_schema=?4;");
     if (!stmt) {
         return CTX_STORE_ERR;
     }
@@ -987,6 +993,7 @@ int ctx_store_upsert_project(ctx_store_t *s, const char *name, const char *root_
     bind_text(stmt, SKIP_ONE, name);
     bind_text(stmt, ST_COL_2, ts);
     bind_text(stmt, ST_COL_3, root_path);
+    sqlite3_bind_int(stmt, ST_COL_4, CTX_EXTRACT_SCHEMA);
 
     int rc = sqlite3_step(stmt);
     if (rc != SQLITE_DONE) {
@@ -994,6 +1001,21 @@ int ctx_store_upsert_project(ctx_store_t *s, const char *name, const char *root_
         return CTX_STORE_ERR;
     }
     return CTX_STORE_OK;
+}
+
+int ctx_store_get_extract_schema(ctx_store_t *s, const char *project) {
+    sqlite3_stmt *stmt = NULL;
+    if (sqlite3_prepare_v2(s->db, "SELECT extract_schema FROM ctx_projects WHERE name = ?1;",
+                           -1, &stmt, NULL) != SQLITE_OK) {
+        return 0;
+    }
+    bind_text(stmt, SKIP_ONE, project);
+    int value = 0;
+    if (sqlite3_step(stmt) == SQLITE_ROW) {
+        value = sqlite3_column_int(stmt, 0);
+    }
+    sqlite3_finalize(stmt);
+    return value;
 }
 
 int ctx_store_get_project(ctx_store_t *s, const char *name, ctx_project_t *out) {

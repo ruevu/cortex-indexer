@@ -670,6 +670,14 @@ static int try_incremental_or_delete_db(ctx_pipeline_t *p, ctx_file_info_t *file
         int hash_count = 0;
         ctx_store_get_file_hashes(check_store, p->project_name, &hashes, &hash_count);
         ctx_store_free_file_hashes(hashes, hash_count);
+        int stored_schema = ctx_store_get_extract_schema(check_store, p->project_name);
+        if (stored_schema != CTX_EXTRACT_SCHEMA) {
+            ctx_log_info("pipeline.route", "path", "schema_change_reindex", "stored",
+                         itoa_buf(stored_schema), "current", itoa_buf(CTX_EXTRACT_SCHEMA));
+            ctx_store_close(check_store);
+            check_store = NULL;
+            goto do_reindex;
+        }
         ctx_store_close(check_store);
         if (hash_count > 0 && file_count <= hash_count + (hash_count / PAIR_LEN)) {
             ctx_log_info("pipeline.route", "path", "incremental", "stored_hashes",
@@ -687,6 +695,7 @@ static int try_incremental_or_delete_db(ctx_pipeline_t *p, ctx_file_info_t *file
     } else if (check_store) {
         ctx_store_close(check_store);
     }
+do_reindex:
     ctx_log_info("pipeline.route", "path", "reindex", "action", "deleting old db");
     ctx_unlink(db_path);
     char wal[PL_WAL_BUF];
