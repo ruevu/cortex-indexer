@@ -56,3 +56,6 @@ CHANGELOG.md
 
 # Soak test output
 soak-results/
+
+# Local Cortex index state (derived, per-checkout)
+.cortex/

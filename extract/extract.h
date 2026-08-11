@@ -110,6 +110,15 @@ typedef struct {
     bool is_abstract;
     bool is_test;
     bool is_entry_point;
+    /* True when this definition was emitted from inside a callable body, so it
+     * is reachable only from within that body's lexical scope.  Distinct from
+     * parent_function, which is NULL for a def inside a *top-level anonymous*
+     * callable (an IIFE, a `describe(...)` block, `app.get('/x', function(){})`)
+     * — such a def gets a flat module-level QN by design, but is still NOT
+     * project-wide resolvable.  Consumers use this to keep scope-local defs out
+     * of the symbol registry and to stop them clobbering a real module-level
+     * node that happens to share their QN. */
+    bool scope_local;
     const char *structural_profile; // AST structural profile (arena-allocated) or NULL
     const char *body_tokens; // space-separated raw identifier tokens from body (arena) or NULL
 } CtxDefinition;
@@ -383,6 +392,12 @@ typedef struct {
     EFCache ef_cache;                      // enclosing function cache
     const char *enclosing_class_qn;        // for nested class QN computation
     const char *enclosing_func_qn;         // for nested function QN computation
+    // Depth of callable-body descent (walk_nested_defs increments on the way in,
+    // decrements on the way out). > 0 means every definition emitted right now
+    // lives inside some function/method body — even when enclosing_func_qn is
+    // NULL because the enclosing callable is a top-level anonymous one. Drives
+    // CtxDefinition.scope_local.
+    int in_callable_body;
     CtxStringConstantMap string_constants; // module-level NAME = "value" pairs
 } CtxExtractCtx;
 

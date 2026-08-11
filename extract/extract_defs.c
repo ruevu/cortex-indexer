@@ -188,6 +188,19 @@ static void extract_elixir_call(CtxExtractCtx *ctx, TSNode node, const CtxLangSp
 
 // --- Helpers ---
 
+// Push a definition, tagging it scope-local when the walk is currently inside a
+// callable body. Single choke point on purpose: every definition constructor in
+// this file goes through it, so the flag can never be forgotten on a newly added
+// one. ctx->in_callable_body is maintained by walk_nested_defs and is > 0 even
+// when ctx->enclosing_func_qn is NULL (top-level anonymous callable — see
+// walk_nested_defs), which is exactly the case a parent_function check misses.
+static void push_def(CtxExtractCtx *ctx, CtxDefinition def) {
+    if (ctx->in_callable_body > 0) {
+        def.scope_local = true;
+    }
+    ctx_defs_push(&ctx->result->defs, ctx->arena, def);
+}
+
 // Get "name" field from a node
 static TSNode func_name_node(TSNode node) {
     return ts_node_child_by_field_name(node, TS_FIELD("name"));
@@ -1706,7 +1719,7 @@ static const char *extract_func_def(CtxExtractCtx *ctx, TSNode node, const CtxLa
         def.is_entry_point = true;
     }
 
-    ctx_defs_push(&ctx->result->defs, a, def);
+    push_def(ctx, def);
     return def.qualified_name;
 }
 
@@ -1724,7 +1737,7 @@ static void push_simple_class_def(CtxExtractCtx *ctx, TSNode node, char *name, c
     def.start_line = ts_node_start_point(node).row + TS_LINE_OFFSET;
     def.end_line = ts_node_end_point(node).row + TS_LINE_OFFSET;
     def.is_exported = true;
-    ctx_defs_push(&ctx->result->defs, a, def);
+    push_def(ctx, def);
 }
 
 // Find TOML table key name from children.
@@ -1902,11 +1915,18 @@ static void extract_class_def(CtxExtractCtx *ctx, TSNode node, const CtxLangSpec
     // A class declared inside a function/method body (no enclosing class)
     // chains onto the enclosing function scope instead, so same-named local
     // classes in different functions don't collide on a flat module QN.
+    // parent_function is set on exactly the branch that scoped the QN to a
+    // function: it is the ENCLOSES edge's source and the registry-exclusion key,
+    // so a function-local class must carry it the same way a nested function
+    // does — otherwise it gets a scoped QN but stays project-wide resolvable and
+    // structurally orphaned.
     const char *class_qn;
+    const char *parent_func = NULL;
     if (ctx->enclosing_class_qn) {
         class_qn = ctx_arena_sprintf(a, "%s.%s", ctx->enclosing_class_qn, name);
     } else if (ctx->enclosing_func_qn) {
         class_qn = ctx_fqn_scoped(a, ctx->enclosing_func_qn, name);
+        parent_func = ctx->enclosing_func_qn;
     } else {
         class_qn = ctx_fqn_compute(a, ctx->project, ctx->rel_path, name);
     }
@@ -1931,6 +1951,7 @@ static void extract_class_def(CtxExtractCtx *ctx, TSNode node, const CtxLangSpec
     def.qualified_name = class_qn;
     def.label = label;
     def.file_path = ctx->rel_path;
+    def.parent_function = parent_func;
     def.start_line = ts_node_start_point(node).row + TS_LINE_OFFSET;
     def.end_line = ts_node_end_point(node).row + TS_LINE_OFFSET;
     def.is_exported = ctx_is_exported(name, ctx->language);
@@ -1938,7 +1959,7 @@ static void extract_class_def(CtxExtractCtx *ctx, TSNode node, const CtxLangSpec
     def.decorators = extract_decorators(a, node, ctx->source, ctx->language, spec);
     def.docstring = extract_docstring(a, node, ctx->source, ctx->language);
 
-    ctx_defs_push(&ctx->result->defs, a, def);
+    push_def(ctx, def);
 
     // Extract methods inside the class
     extract_class_methods(ctx, node, class_qn, spec);
@@ -2136,7 +2157,7 @@ static const char *push_method_def(CtxExtractCtx *ctx, TSNode child, const char 
     // MinHash fingerprint
     compute_fingerprint(ctx, &def, child);
 
-    ctx_defs_push(&ctx->result->defs, a, def);
+    push_def(ctx, def);
     return method_qn;
 }
 
@@ -2274,7 +2295,7 @@ static void extract_rust_impl(CtxExtractCtx *ctx, TSNode node, const CtxLangSpec
         // MinHash fingerprint
         compute_fingerprint(ctx, &def, child);
 
-        ctx_defs_push(&ctx->result->defs, a, def);
+        push_def(ctx, def);
         walk_nested_defs(ctx, child, spec, method_qn);
     }
 }
@@ -2323,7 +2344,7 @@ static void extract_elixir_func_def(CtxExtractCtx *ctx, TSNode node, const char 
     def.start_line = ts_node_start_point(node).row + TS_LINE_OFFSET;
     def.end_line = ts_node_end_point(node).row + TS_LINE_OFFSET;
     def.is_exported = (strcmp(macro, "def") == 0 || strcmp(macro, "defmacro") == 0);
-    ctx_defs_push(&ctx->result->defs, a, def);
+    push_def(ctx, def);
 }
 
 // Emit Class definition for an Elixir defmodule node. Returns do_block or null.
@@ -2351,7 +2372,7 @@ static TSNode emit_elixir_module_class(CtxExtractCtx *ctx, TSNode cur) {
     def.start_line = ts_node_start_point(cur).row + TS_LINE_OFFSET;
     def.end_line = ts_node_end_point(cur).row + TS_LINE_OFFSET;
     def.is_exported = true;
-    ctx_defs_push(&ctx->result->defs, a, def);
+    push_def(ctx, def);
     return ctx_find_child_by_kind(cur, "do_block");
 }
 
@@ -2415,7 +2436,7 @@ static void push_var_def(CtxExtractCtx *ctx, const char *name, TSNode node) {
     def.start_line = ts_node_start_point(node).row + TS_LINE_OFFSET;
     def.end_line = ts_node_end_point(node).row + TS_LINE_OFFSET;
     def.is_exported = ctx_is_exported(name, ctx->language);
-    ctx_defs_push(&ctx->result->defs, a, def);
+    push_def(ctx, def);
 }
 
 // Helper: extract name from a declarator chain (C/C++/ObjC)
@@ -3214,7 +3235,7 @@ static void extract_class_fields(CtxExtractCtx *ctx, TSNode class_node, const ch
         def.end_line = ts_node_end_point(child).row + TS_LINE_OFFSET;
         def.is_exported = ctx_is_exported(name, ctx->language);
 
-        ctx_defs_push(&ctx->result->defs, a, def);
+        push_def(ctx, def);
     }
 }
 
@@ -3367,15 +3388,33 @@ static void push_class_body_children(TSNode node, const CtxLangSpec *spec, walk_
 // used to silently skip every definition nested inside a top-level anonymous
 // callable — the dominant real-world shape being test files (`describe`/`it`
 // blocks), whose bodies were never walked at all.
+//
+// Descending clears enclosing_class_qn for the duration: a function/method body
+// resets class nesting, the exact mirror of the existing rule that a class body
+// resets function nesting (push_class_body_children / push_nested_class_nodes
+// pass NULL for the frame's function slot). Without the reset, a class declared
+// in a method of a *nested* class saw the stale OUTER class QN — and
+// extract_class_def tests enclosing_class_qn before enclosing_func_qn, so that
+// stale outer scope beat the nearer method scope. The unified walker in
+// extract_unified.c picks the innermost owner by depth, so the two walkers
+// disagreed on the QN and the body's calls fell back to the file node.
+//
+// in_callable_body tracks the descent depth so definitions found here can be
+// tagged scope_local (see push_def). It is a separate signal from owner_qn
+// precisely because owner_qn is legitimately NULL above: those defs get flat
+// module QNs, but they are still not project-wide resolvable.
 static void walk_nested_defs(CtxExtractCtx *ctx, TSNode owner_node, const CtxLangSpec *spec,
                              const char *owner_qn) {
     const char *saved_func = ctx->enclosing_func_qn;
     const char *saved_class = ctx->enclosing_class_qn;
     ctx->enclosing_func_qn = owner_qn;
+    ctx->enclosing_class_qn = NULL;
+    ctx->in_callable_body++;
     uint32_t nc = ts_node_child_count(owner_node);
     for (uint32_t i = 0; i < nc; i++) {
         walk_defs(ctx, ts_node_child(owner_node, i), spec, 0);
     }
+    ctx->in_callable_body--;
     ctx->enclosing_func_qn = saved_func;
     ctx->enclosing_class_qn = saved_class;
 }

@@ -400,15 +400,43 @@ typedef struct {
     _Atomic int next_file_idx;
 } extract_ctx_t;
 
+/* Insert a definition's node, honouring scope-local precedence: the outermost
+ * (real) definition owns its qualified name.  ctx_gbuf_upsert_node updates in
+ * place on a QN collision, so without this a scope-local def sharing a QN with
+ * a real module-level one silently overwrites its label / file_path / line span
+ * — e.g. a closure inside a top-level `describe(...)` callback clobbering the
+ * exported function of the same name, making get_code_snippet return the
+ * closure's body for the public API.
+ *
+ * Both insertion orders end with the real definition winning:
+ *   real first  — the scope-local def finds the node and leaves it untouched,
+ *                 returning the existing id so its DEFINES / ENCLOSES edges (and
+ *                 later call-source lookups by QN) still land on a real node;
+ *   local first — the node exists but carries no immutability marker, so the
+ *                 later non-scope-local def upserts over it as usual.
+ * Two scope-local defs colliding is arbitrary but harmless: the first wins.
+ * Mirrors upsert_def_node in pass_definitions.c — keep the two in sync.
+ * A QN collision between two defs is intra-file (the QN embeds the path), so it
+ * is always resolved inside one worker's local gbuf, before ctx_gbuf_merge. */
+static int64_t upsert_def_node(ctx_gbuf_t *gbuf, const CtxDefinition *def, const char *rel,
+                               const char *props) {
+    if (def->scope_local) {
+        const ctx_gbuf_node_t *existing = ctx_gbuf_find_by_qn(gbuf, def->qualified_name);
+        if (existing) {
+            return existing->id;
+        }
+    }
+    return ctx_gbuf_upsert_node(gbuf, def->label ? def->label : "Function", def->name,
+                                def->qualified_name, def->file_path ? def->file_path : rel,
+                                (int)def->start_line, (int)def->end_line, props);
+}
+
 /* Insert one definition node (and its route if present) into the local gbuf. */
 static void insert_def_into_gbuf(extract_worker_state_t *ws, const ctx_file_info_t *fi,
                                  CtxDefinition *def) {
     char props[CTX_SZ_2K];
     build_def_props(props, sizeof(props), def);
-    int64_t func_id =
-        ctx_gbuf_upsert_node(ws->local_gbuf, def->label ? def->label : "Function", def->name,
-                             def->qualified_name, def->file_path ? def->file_path : fi->rel_path,
-                             (int)def->start_line, (int)def->end_line, props);
+    int64_t func_id = upsert_def_node(ws->local_gbuf, def, fi->rel_path, props);
     ws->nodes_created++;
     if (def->route_path && def->route_path[0] != '\0') {
         const char *rm = def->route_method ? def->route_method : "ANY";
@@ -671,8 +699,11 @@ static int register_and_link_def(ctx_pipeline_ctx_t *ctx, const CtxDefinition *d
     }
     /* Register callable symbols + Interface — see pass_definitions.c for rationale.
      * Nested definitions are deliberately excluded from the registry (closures
-     * are not project-wide-callable) — see pass_definitions.c for rationale. */
-    if (!def->parent_function &&
+     * are not project-wide-callable) — see pass_definitions.c for rationale.
+     * scope_local is checked alongside parent_function, not instead of it: a def
+     * inside a top-level *anonymous* callable is module-QN'd and so has no
+     * parent_function, yet is just as unreachable from another file. */
+    if (!def->parent_function && !def->scope_local &&
         (strcmp(def->label, "Function") == 0 || strcmp(def->label, "Method") == 0 ||
          strcmp(def->label, "Class") == 0 || strcmp(def->label, "Interface") == 0)) {
         ctx_registry_add(ctx->registry, def->name, def->qualified_name, def->label);

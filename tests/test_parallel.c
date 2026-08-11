@@ -662,6 +662,219 @@ TEST(nested_defs_encloses_parity) {
     PASS();
 }
 
+/* ── Scope-local definitions: registry + node ownership ───────────
+ *
+ * These live at the pipeline layer, not in test_extraction.c, because both
+ * things under test only exist once definitions have been through a pipeline
+ * pass: the symbol registry (built by ctx_registry_add in pass_definitions.c /
+ * register_and_link_def) is what turns a name into a cross-file resolution
+ * target, and the graph-buffer node — whose start_line the clobber test reads —
+ * is created by the same pass. Extraction alone has neither a registry nor a
+ * cross-file view. Every case runs BOTH pipeline paths, so the two stay honest
+ * about sharing this logic. */
+
+static char g_scope_tmpdir[256];
+
+static int write_fixture(const char *dir, const char *name, const char *content) {
+    char path[512];
+    snprintf(path, sizeof(path), "%s/%s", dir, name);
+    FILE *f = fopen(path, "w");
+    if (!f)
+        return -1;
+    fputs(content, f);
+    fclose(f);
+    return 0;
+}
+
+static int setup_scope_local_repo(void) {
+    snprintf(g_scope_tmpdir, sizeof(g_scope_tmpdir), "/tmp/ctx_scope_XXXXXX");
+    if (!ctx_mkdtemp(g_scope_tmpdir))
+        return -1;
+
+    /* prod.ts — a production call site for a name that exists ONLY as a closure
+     * inside spec.ts's top-level (anonymous) describe callback. */
+    if (write_fixture(g_scope_tmpdir, "prod.ts",
+                      "export function prodFn(thing) { return parseThing(thing); }\n") != 0)
+        return -1;
+
+    /* spec.ts — line 1 declares the real exported dupName; line 4 re-declares
+     * the same name as a closure inside the anonymous callback, so both land on
+     * the QN <proj>.spec.dupName. Real definition first. */
+    if (write_fixture(g_scope_tmpdir, "spec.ts",
+                      "export function dupName() { return 0; }\n"       /* 1 */
+                      "describe(\"suite\", () => {\n"                   /* 2 */
+                      "  const parseThing = (x) => { return x + 1; };\n" /* 3 */
+                      "  const dupName = () => { return 99; };\n"       /* 4 */
+                      "  it(\"works\", () => { parseThing(1); });\n"    /* 5 */
+                      "});\n") != 0)                                    /* 6 */
+        return -1;
+
+    /* late.ts — the same collision in the OPPOSITE insertion order: the
+     * scope-local dupLate (line 2) is extracted before the real one (line 4). */
+    if (write_fixture(g_scope_tmpdir, "late.ts",
+                      "describe(\"suite\", () => {\n"                   /* 1 */
+                      "  const dupLate = () => { return 99; };\n"       /* 2 */
+                      "});\n"                                           /* 3 */
+                      "export function dupLate() { return 0; }\n") != 0) /* 4 */
+        return -1;
+
+    /* a.py — class Local declared inside a method body. */
+    if (write_fixture(g_scope_tmpdir, "a.py",
+                      "class Outer:\n"
+                      "    def m(self):\n"
+                      "        class Local:\n"
+                      "            def p(self):\n"
+                      "                return 1\n") != 0)
+        return -1;
+
+    /* b.py — an unrelated file naming that function-local class. */
+    if (write_fixture(g_scope_tmpdir, "b.py", "def uses():\n"
+                                              "    return Local()\n") != 0)
+        return -1;
+
+    return 0;
+}
+
+/* Edges of the given type running src_qn -> dst_qn. Returns -1 when either node
+ * is missing, so an assertion of 0 can never pass vacuously on a typo'd QN. */
+static int count_edges_between(ctx_gbuf_t *gbuf, const char *src_qn, const char *dst_qn,
+                               const char *type) {
+    const ctx_gbuf_node_t *src = ctx_gbuf_find_by_qn(gbuf, src_qn);
+    const ctx_gbuf_node_t *dst = ctx_gbuf_find_by_qn(gbuf, dst_qn);
+    if (!src || !dst)
+        return -1;
+    const ctx_gbuf_edge_t **edges = NULL;
+    int edge_count = 0;
+    ctx_gbuf_find_edges_by_source_type(gbuf, src->id, type, &edges, &edge_count);
+    int hits = 0;
+    for (int i = 0; i < edge_count; i++)
+        if (edges[i]->target_id == dst->id)
+            hits++;
+    return hits;
+}
+
+/* start_line of a node, or -1 when absent. */
+static int node_start_line(ctx_gbuf_t *gbuf, const char *qn) {
+    const ctx_gbuf_node_t *node = ctx_gbuf_find_by_qn(gbuf, qn);
+    return node ? node->start_line : -1;
+}
+
+/* Run both pipeline paths over the scope-local fixture. Returns -1 on setup
+ * failure (caller SKIPs); caller frees both gbufs and removes the tmpdir. */
+static int run_scope_local_both(ctx_gbuf_t **out_seq, ctx_gbuf_t **out_par) {
+    if (setup_scope_local_repo() != 0)
+        return -1;
+    ctx_discover_opts_t opts = {.mode = CTX_MODE_FULL};
+    ctx_file_info_t *files = NULL;
+    int file_count = 0;
+    if (ctx_discover(g_scope_tmpdir, &opts, &files, &file_count) != 0) {
+        rm_rf(g_scope_tmpdir);
+        return -1;
+    }
+    *out_seq = run_sequential("scope-test", g_scope_tmpdir, files, file_count);
+    *out_par = run_parallel("scope-test", g_scope_tmpdir, files, file_count, 2);
+    ctx_discover_free(files, file_count);
+    return 0;
+}
+
+static void free_scope_local(ctx_gbuf_t *seq, ctx_gbuf_t *par) {
+    ctx_gbuf_free(seq);
+    ctx_gbuf_free(par);
+    rm_rf(g_scope_tmpdir);
+}
+
+/* C1: a helper declared inside a top-level ANONYMOUS callable has no
+ * parent_function (it is module-QN'd by design), so the parent_function-only
+ * registry guard let it into the project-wide symbol table — and a production
+ * function in another file resolved its call straight into a spec file's
+ * describe-block closure. */
+TEST(scope_local_def_not_cross_file_resolvable) {
+    ctx_gbuf_t *seq = NULL;
+    ctx_gbuf_t *par = NULL;
+    if (run_scope_local_both(&seq, &par) != 0)
+        SKIP("setup failed");
+
+    /* The closure is still a node — reachable by name and by source. */
+    int seq_has_node = ctx_gbuf_find_by_qn(seq, "scope-test.spec.parseThing") != NULL;
+    int par_has_node = ctx_gbuf_find_by_qn(par, "scope-test.spec.parseThing") != NULL;
+    /* Its caller is still function-sourced, not file-sourced. */
+    int seq_has_caller = ctx_gbuf_find_by_qn(seq, "scope-test.prod.prodFn") != NULL;
+    /* ...but nothing outside spec.ts resolves TO it. */
+    int seq_edges =
+        count_edges_between(seq, "scope-test.prod.prodFn", "scope-test.spec.parseThing", "CALLS");
+    int par_edges =
+        count_edges_between(par, "scope-test.prod.prodFn", "scope-test.spec.parseThing", "CALLS");
+
+    free_scope_local(seq, par);
+
+    ASSERT_TRUE(seq_has_node);
+    ASSERT_TRUE(par_has_node);
+    ASSERT_TRUE(seq_has_caller);
+    ASSERT_EQ(seq_edges, 0);
+    ASSERT_EQ(par_edges, 0);
+    PASS();
+}
+
+/* I1: ctx_gbuf_upsert_node updates in place on a QN collision, so a scope-local
+ * def overwrote the label / file / line span of a real module-level def with the
+ * same name — get_code_snippet on the exported API returned the closure body. */
+TEST(scope_local_def_does_not_clobber_toplevel_node) {
+    ctx_gbuf_t *seq = NULL;
+    ctx_gbuf_t *par = NULL;
+    if (run_scope_local_both(&seq, &par) != 0)
+        SKIP("setup failed");
+
+    /* Real definition inserted FIRST (spec.ts line 1, closure line 4). */
+    int seq_dup = node_start_line(seq, "scope-test.spec.dupName");
+    int par_dup = node_start_line(par, "scope-test.spec.dupName");
+    /* Scope-local inserted FIRST (late.ts line 2, real definition line 4) — the
+     * later real def must still be able to take the node over. */
+    int seq_late = node_start_line(seq, "scope-test.late.dupLate");
+    int par_late = node_start_line(par, "scope-test.late.dupLate");
+
+    free_scope_local(seq, par);
+
+    ASSERT_EQ(seq_dup, 1);
+    ASSERT_EQ(par_dup, 1);
+    ASSERT_EQ(seq_late, 4);
+    ASSERT_EQ(par_late, 4);
+    PASS();
+}
+
+/* I3: a class declared in a method body got a function-scoped QN, but
+ * registry-exclusion and ENCLOSES both keyed on parent_function, which only
+ * extract_func_def used to set — so the class was both project-wide resolvable
+ * and structurally orphaned. */
+TEST(function_local_class_not_cross_file_resolvable) {
+    ctx_gbuf_t *seq = NULL;
+    ctx_gbuf_t *par = NULL;
+    if (run_scope_local_both(&seq, &par) != 0)
+        SKIP("setup failed");
+
+    int seq_has_node = ctx_gbuf_find_by_qn(seq, "scope-test.a.Outer.m.Local") != NULL;
+    int par_has_node = ctx_gbuf_find_by_qn(par, "scope-test.a.Outer.m.Local") != NULL;
+    /* Structurally attached to the method that declares it. */
+    int seq_encloses = count_edges_between(seq, "scope-test.a.Outer.m",
+                                           "scope-test.a.Outer.m.Local", "ENCLOSES");
+    int par_encloses = count_edges_between(par, "scope-test.a.Outer.m",
+                                           "scope-test.a.Outer.m.Local", "ENCLOSES");
+    /* ...and invisible to another file. */
+    int seq_leak =
+        count_edges_between(seq, "scope-test.b.uses", "scope-test.a.Outer.m.Local", "CALLS");
+    int par_leak =
+        count_edges_between(par, "scope-test.b.uses", "scope-test.a.Outer.m.Local", "CALLS");
+
+    free_scope_local(seq, par);
+
+    ASSERT_TRUE(seq_has_node);
+    ASSERT_TRUE(par_has_node);
+    ASSERT_EQ(seq_encloses, 1);
+    ASSERT_EQ(par_encloses, 1);
+    ASSERT_EQ(seq_leak, 0);
+    ASSERT_EQ(par_leak, 0);
+    PASS();
+}
+
 /* ── Suite Registration ──────────────────────────────────────────── */
 
 SUITE(parallel) {
@@ -689,6 +902,11 @@ SUITE(parallel) {
     RUN_TEST(parallel_nuxt_route_handles);
     RUN_TEST(nested_defs_enclose_and_skip_registry);
     RUN_TEST(nested_defs_encloses_parity);
+
+    /* Scope-local definitions: registry exclusion + node ownership */
+    RUN_TEST(scope_local_def_not_cross_file_resolvable);
+    RUN_TEST(scope_local_def_does_not_clobber_toplevel_node);
+    RUN_TEST(function_local_class_not_cross_file_resolvable);
 
     /* Cleanup shared state */
     parity_teardown();

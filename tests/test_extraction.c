@@ -49,6 +49,16 @@ static const char *def_parent_of(CtxFileResult *r, const char *name) {
     return NULL;
 }
 
+/* Return 1/0 for the scope_local flag of the first def with the given short
+ * name; -1 when no such def exists. */
+static int def_is_scope_local(CtxFileResult *r, const char *name) {
+    for (int i = 0; i < r->defs.count; i++) {
+        if (strcmp(r->defs.items[i].name, name) == 0)
+            return r->defs.items[i].scope_local ? 1 : 0;
+    }
+    return -1;
+}
+
 /* Check if any call to the given callee exists. */
 static int has_call(CtxFileResult *r, const char *callee) {
     for (int i = 0; i < r->calls.count; i++) {
@@ -2664,6 +2674,61 @@ TEST(nested_call_in_class_nested_in_class_chains_fully) {
     PASS();
 }
 
+TEST(nested_class_in_method_of_nested_class_chains_fully) {
+    /* class Local declared in a method of a NESTED class -- the shape that
+     * exposes a stale ctx->enclosing_class_qn. walk_nested_defs must clear the
+     * class scope on the way into m's body: extract_class_def tests
+     * enclosing_class_qn BEFORE enclosing_func_qn, so a leftover outer-class
+     * scope beats the nearer method scope and names the class t.n2.Outer.Local.
+     * The unified walker picks the innermost owner by depth and names it
+     * t.n2.Outer.Inner.m.Local, so the walkers disagree and p's call to target
+     * finds no node for its scope QN and falls back to the file node.
+     * The one-level shape (class in a method of a TOP-LEVEL class) hides this:
+     * enclosing_class_qn happens to be NULL there. */
+    CtxFileResult *r = extract("def target():\n"
+                               "    return 0\n"
+                               "\n"
+                               "class Outer:\n"
+                               "    class Inner:\n"
+                               "        def m(self):\n"
+                               "            class Local:\n"
+                               "                def p(self):\n"
+                               "                    return target()\n",
+                               CTX_LANG_PYTHON, "t", "n2.py");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    ASSERT(has_def_qn(r, "Class", "t.n2.Outer.Inner.m.Local"));
+    ASSERT_FALSE(has_def_qn(r, "Class", "t.n2.Outer.Local"));
+    ASSERT(has_def_qn(r, "Method", "t.n2.Outer.Inner.m.Local.p"));
+    /* The call attributes to the method, not to t.n2.__file__. */
+    ASSERT_STR_EQ(call_scope_of(r, "target"), "t.n2.Outer.Inner.m.Local.p");
+    /* A function-local class carries parent_function, so the pipeline can hang
+     * an ENCLOSES edge off it and keep it out of the symbol registry. */
+    ASSERT_STR_EQ(def_parent_of(r, "Local"), "t.n2.Outer.Inner.m");
+    ctx_free_result(r);
+    PASS();
+}
+
+TEST(nested_def_in_toplevel_anonymous_cb_is_scope_local) {
+    /* A def inside a top-level anonymous callable is module-QN'd by design --
+     * both walkers agree on the flat QN -- so parent_function is NULL. That
+     * makes parent_function useless as a "not project-wide resolvable" test:
+     * scope_local is the separate bit that says so. */
+    CtxFileResult *r = extract("export function realTop() { return 1; }\n"
+                               "describe(\"suite\", () => {\n"
+                               "  const cbLocal = () => 2;\n"
+                               "});\n",
+                               CTX_LANG_TYPESCRIPT, "t", "sl.ts");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    ASSERT(has_def_qn(r, "Function", "t.sl.cbLocal"));
+    ASSERT_NULL(def_parent_of(r, "cbLocal"));
+    ASSERT_EQ(def_is_scope_local(r, "cbLocal"), 1);
+    ASSERT_EQ(def_is_scope_local(r, "realTop"), 0);
+    ctx_free_result(r);
+    PASS();
+}
+
 TEST(nested_anonymous_callback_makes_no_node) {
     CtxFileResult *r = extract("export function outerCb(items) {\n"
                                "  items.forEach(x => { doThing(x); });\n"
@@ -2993,6 +3058,8 @@ SUITE(extraction) {
     RUN_TEST(nested_call_in_anonymous_cb_keeps_outer_scope);
     RUN_TEST(nested_call_in_class_nested_in_function_chains_fully);
     RUN_TEST(nested_call_in_class_nested_in_class_chains_fully);
+    RUN_TEST(nested_class_in_method_of_nested_class_chains_fully);
+    RUN_TEST(nested_def_in_toplevel_anonymous_cb_is_scope_local);
     RUN_TEST(nested_anonymous_callback_makes_no_node);
     RUN_TEST(nested_in_method_body);
     RUN_TEST(nested_cpp_template_not_duplicated);
