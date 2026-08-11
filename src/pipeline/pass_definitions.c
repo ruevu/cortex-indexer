@@ -219,32 +219,31 @@ static void build_def_props(char *buf, size_t bufsize, const CtxDefinition *def)
 }
 
 /* Insert a definition's node, honouring scope-local precedence: the outermost
- * (real) definition owns its qualified name.  ctx_gbuf_upsert_node updates in
- * place on a QN collision, so without this a scope-local def sharing a QN with
- * a real module-level one silently overwrites its label / file_path / line span
- * — e.g. a closure inside a top-level `describe(...)` callback clobbering the
- * exported function of the same name, making get_code_snippet return the
- * closure's body for the public API.
+ * (real) definition owns its qualified name.  A plain upsert updates in place on
+ * a QN collision, so without this a scope-local def sharing a QN with a real
+ * module-level one silently overwrites its label / file_path / line span — e.g.
+ * a closure inside a top-level `describe(...)` callback clobbering the exported
+ * function of the same name, making get_code_snippet return the closure's body
+ * for the public API.
  *
- * Both insertion orders end with the real definition winning:
+ * ctx_gbuf_upsert_def_node carries def->scope_local onto the node, which makes
+ * both insertion orders end with the real definition winning:
  *   real first  — the scope-local def finds the node and leaves it untouched,
  *                 returning the existing id so its DEFINES / ENCLOSES edges (and
  *                 later call-source lookups by QN) still land on a real node;
- *   local first — the node exists but carries no immutability marker, so the
- *                 later non-scope-local def upserts over it as usual.
+ *   local first — the node carries the scope-local flag, which is not a lock, so
+ *                 the later non-scope-local def upserts over it as usual (and
+ *                 clears the flag).
  * Two scope-local defs colliding is arbitrary but harmless: the first wins.
- * Mirrors insert_def_into_gbuf in pass_parallel.c — keep the two in sync. */
+ * The flag on the node is also what lets ctx_gbuf_merge apply the same rule to a
+ * collision discovered only when two workers' buffers meet — see pass_parallel.c.
+ * Mirrors upsert_def_node in pass_parallel.c — keep the two in sync. */
 static int64_t upsert_def_node(ctx_gbuf_t *gbuf, const CtxDefinition *def, const char *rel,
                                const char *props) {
-    if (def->scope_local) {
-        const ctx_gbuf_node_t *existing = ctx_gbuf_find_by_qn(gbuf, def->qualified_name);
-        if (existing) {
-            return existing->id;
-        }
-    }
-    return ctx_gbuf_upsert_node(gbuf, def->label ? def->label : "Function", def->name,
-                                def->qualified_name, def->file_path ? def->file_path : rel,
-                                (int)def->start_line, (int)def->end_line, props);
+    return ctx_gbuf_upsert_def_node(gbuf, def->label ? def->label : "Function", def->name,
+                                    def->qualified_name, def->file_path ? def->file_path : rel,
+                                    (int)def->start_line, (int)def->end_line, props,
+                                    def->scope_local);
 }
 
 /* Process one definition: create node, register, DEFINES + DEFINES_METHOD edges. */

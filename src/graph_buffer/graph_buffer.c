@@ -33,6 +33,7 @@ enum {
 #include <sqlite3.h>
 
 #include <stdatomic.h>
+#include <stdbool.h>
 #include <stdint.h> // int64_t
 #include <stdio.h>
 #include <stdlib.h>
@@ -542,9 +543,9 @@ void ctx_gbuf_set_next_id(ctx_gbuf_t *gb, int64_t next_id) {
 
 /* ── Node operations ─────────────────────────────────────────────── */
 
-int64_t ctx_gbuf_upsert_node(ctx_gbuf_t *gb, const char *label, const char *name,
-                             const char *qualified_name, const char *file_path, int start_line,
-                             int end_line, const char *properties_json) {
+static int64_t upsert_node_impl(ctx_gbuf_t *gb, const char *label, const char *name,
+                                const char *qualified_name, const char *file_path, int start_line,
+                                int end_line, const char *properties_json, bool scope_local) {
     if (!gb || !qualified_name) {
         return 0;
     }
@@ -552,6 +553,12 @@ int64_t ctx_gbuf_upsert_node(ctx_gbuf_t *gb, const char *label, const char *name
     /* Check if node already exists */
     ctx_gbuf_node_t *existing = ctx_ht_get(gb->node_by_qn, qualified_name);
     if (existing) {
+        /* Scope-local precedence: a definition found inside a callable body
+         * never takes over a qualified name that is already claimed. Return the
+         * owner's ID so the caller's edges still land on a real node. */
+        if (scope_local) {
+            return existing->id;
+        }
         /* Update in-place. Strdup new values BEFORE freeing old ones,
          * because callers may pass existing->label etc. as arguments. */
         char *new_label = heap_strdup(label);
@@ -570,6 +577,10 @@ int64_t ctx_gbuf_upsert_node(ctx_gbuf_t *gb, const char *label, const char *name
             free(existing->properties_json);
             existing->properties_json = new_props;
         }
+        /* The node now belongs to a non-scope-local writer. Clearing the flag
+         * matters when gb is a worker buffer that is later merged: the merge
+         * reads the flag off the src node, not off a CtxDefinition. */
+        existing->scope_local = false;
         return existing->id;
     }
 
@@ -589,12 +600,27 @@ int64_t ctx_gbuf_upsert_node(ctx_gbuf_t *gb, const char *label, const char *name
     node->start_line = start_line;
     node->end_line = end_line;
     node->properties_json = heap_strdup(properties_json);
+    node->scope_local = scope_local;
 
     /* Store pointer in array and register in all indexes */
     ctx_da_push(&gb->nodes, node);
     register_node_in_indexes(gb, node);
 
     return id;
+}
+
+int64_t ctx_gbuf_upsert_node(ctx_gbuf_t *gb, const char *label, const char *name,
+                             const char *qualified_name, const char *file_path, int start_line,
+                             int end_line, const char *properties_json) {
+    return upsert_node_impl(gb, label, name, qualified_name, file_path, start_line, end_line,
+                            properties_json, false);
+}
+
+int64_t ctx_gbuf_upsert_def_node(ctx_gbuf_t *gb, const char *label, const char *name,
+                                 const char *qualified_name, const char *file_path, int start_line,
+                                 int end_line, const char *properties_json, bool scope_local) {
+    return upsert_node_impl(gb, label, name, qualified_name, file_path, start_line, end_line,
+                            properties_json, scope_local);
 }
 
 const ctx_gbuf_node_t *ctx_gbuf_find_by_qn(const ctx_gbuf_t *gb, const char *qn) {
@@ -1030,9 +1056,8 @@ static void free_remap_entry(const char *key, void *val, void *ud) {
     free(val);
 }
 
-/* Handle QN collision: update dst node fields (src wins), record remap if IDs differ. */
-static void merge_update_existing(ctx_gbuf_node_t *existing, const ctx_gbuf_node_t *sn,
-                                  CtxHashTable **remap) {
+/* Overwrite a dst node's fields from a colliding src node. */
+static void merge_overwrite_fields(ctx_gbuf_node_t *existing, const ctx_gbuf_node_t *sn) {
     free(existing->label);
     existing->label = heap_strdup(sn->label);
     free(existing->name);
@@ -1044,6 +1069,24 @@ static void merge_update_existing(ctx_gbuf_node_t *existing, const ctx_gbuf_node
     if (sn->properties_json) {
         free(existing->properties_json);
         existing->properties_json = heap_strdup(sn->properties_json);
+    }
+    existing->scope_local = sn->scope_local; /* always false on this branch */
+}
+
+/* Handle QN collision: update dst node fields (src wins), record remap if IDs differ.
+ *
+ * Two DIFFERENT files can produce the same qualified name — a *named* def drops
+ * a trailing `index` / `__init__` path segment from its FQN, so `lib.ts` and
+ * `lib/index.ts` both yield `<proj>.lib.<name>`. When those files are extracted
+ * by different workers, each creates the node in its own local buffer and the
+ * collision is only seen here. So the scope-local rule ctx_gbuf_upsert_def_node
+ * applies within a buffer has to be applied across buffers too: a scope-local
+ * src node leaves the existing node's fields untouched. The ID remap is still
+ * recorded, so the skipped node's edges retarget the surviving node. */
+static void merge_update_existing(ctx_gbuf_node_t *existing, const ctx_gbuf_node_t *sn,
+                                  CtxHashTable **remap) {
+    if (!sn->scope_local) {
+        merge_overwrite_fields(existing, sn);
     }
 
     if (sn->id != existing->id) {
@@ -1074,6 +1117,7 @@ static void merge_copy_new_node(ctx_gbuf_t *dst, const ctx_gbuf_node_t *sn) {
     node->start_line = sn->start_line;
     node->end_line = sn->end_line;
     node->properties_json = heap_strdup(sn->properties_json);
+    node->scope_local = sn->scope_local;
 
     ctx_da_push(&dst->nodes, node);
     register_node_in_indexes(dst, node);

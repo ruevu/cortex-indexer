@@ -32,6 +32,12 @@ typedef struct {
     int start_line;
     int end_line;
     char *properties_json; /* heap-owned JSON string, "{}" default */
+    /* Definition found inside a callable body (closure / describe-block local).
+     * Set only by ctx_gbuf_upsert_def_node; false for every other node, and for
+     * every node created before this flag existed. Read by the upsert and merge
+     * paths to keep a scope-local definition from taking over a qualified name
+     * that a real, module-level definition owns. */
+    bool scope_local;
 } ctx_gbuf_node_t;
 
 typedef struct {
@@ -59,7 +65,10 @@ ctx_gbuf_t *ctx_gbuf_new_shared_ids(const char *project, const char *root_path,
 void ctx_gbuf_free(ctx_gbuf_t *gb);
 
 /* Merge all nodes and edges from src into dst.
- * Nodes are merged by QN: on collision, src wins (updates dst node fields).
+ * Nodes are merged by QN: on collision, src wins (updates dst node fields) —
+ * except when the src node is scope_local, which never overwrites an existing
+ * dst node (same rule ctx_gbuf_upsert_def_node applies within one buffer). The
+ * ID remap is recorded either way, so edges follow the surviving node.
  * New nodes are inserted with their original IDs (from shared ID source).
  * Edges are remapped for any QN-colliding nodes, then inserted with dedup.
  * After merge, src can be safely freed (all data is copied).
@@ -74,6 +83,21 @@ int ctx_gbuf_merge(ctx_gbuf_t *dst, ctx_gbuf_t *src);
 int64_t ctx_gbuf_upsert_node(ctx_gbuf_t *gb, const char *label, const char *name,
                              const char *qualified_name, const char *file_path, int start_line,
                              int end_line, const char *properties_json);
+
+/* Upsert a definition node, honouring scope-local precedence: the outermost
+ * (real) definition owns its qualified name.
+ *
+ * scope_local == false behaves exactly like ctx_gbuf_upsert_node, and also
+ * clears the flag on the node it takes over.  scope_local == true creates the
+ * node when the QN is free, but on a collision leaves the existing node's
+ * fields alone and returns its ID — so a closure never overwrites the label /
+ * file_path / line span of a real definition sharing its QN, while its edges
+ * still land on a real node.  The flag is recorded on the node so that
+ * ctx_gbuf_merge can apply the same rule to a collision between two buffers.
+ * Returns 0 on error. */
+int64_t ctx_gbuf_upsert_def_node(ctx_gbuf_t *gb, const char *label, const char *name,
+                                 const char *qualified_name, const char *file_path, int start_line,
+                                 int end_line, const char *properties_json, bool scope_local);
 
 /* Find a node by qualified name. Returns NULL if not found. */
 const ctx_gbuf_node_t *ctx_gbuf_find_by_qn(const ctx_gbuf_t *gb, const char *qn);

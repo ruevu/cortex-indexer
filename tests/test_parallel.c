@@ -413,6 +413,75 @@ TEST(gbuf_merge_src_free_safe) {
     PASS();
 }
 
+/* Cross-worker scope-local collision at the merge layer.
+ *
+ * upsert_def_node's scope-local rule only sees ONE worker's local gbuf, but two
+ * DIFFERENT files can produce the same qualified name: a *named* def's FQN drops
+ * a trailing `index` segment, so `lib.ts` and `lib/index.ts` both yield
+ * `proj.lib.collideMe`. Land them in different workers and the collision is only
+ * visible to ctx_gbuf_merge — which used to overwrite unconditionally, so a test
+ * closure took over the exported function's file/line span whenever the closure's
+ * worker merged last. Both merge orders must end with the real definition owning
+ * the node. */
+TEST(gbuf_merge_scope_local_never_clobbers) {
+    _Atomic int64_t shared = 1;
+    ctx_gbuf_t *w_real = ctx_gbuf_new_shared_ids("proj", "/", &shared);
+    ctx_gbuf_t *w_local = ctx_gbuf_new_shared_ids("proj", "/", &shared);
+    ctx_gbuf_t *dst_real_first = ctx_gbuf_new_shared_ids("proj", "/", &shared);
+    ctx_gbuf_t *dst_local_first = ctx_gbuf_new_shared_ids("proj", "/", &shared);
+
+    /* worker A: the real exported definition (lib.ts line 4). */
+    ctx_gbuf_upsert_def_node(w_real, "Function", "collideMe", "proj.lib.collideMe", "lib.ts", 4, 6,
+                             "{}", false);
+    /* worker B: a describe-block closure of the same name (lib/index.ts line 2). */
+    int64_t local_id = ctx_gbuf_upsert_def_node(w_local, "Function", "collideMe",
+                                                "proj.lib.collideMe", "lib/index.ts", 2, 2, "{}",
+                                                true);
+    /* An edge sourced at the scope-local node must follow it onto the survivor. */
+    ctx_gbuf_insert_edge(w_local, local_id, local_id, "CALLS", "{}");
+
+    ctx_gbuf_merge(dst_real_first, w_real);
+    ctx_gbuf_merge(dst_real_first, w_local);
+
+    ctx_gbuf_merge(dst_local_first, w_local);
+    ctx_gbuf_merge(dst_local_first, w_real);
+
+    const ctx_gbuf_node_t *rf = ctx_gbuf_find_by_qn(dst_real_first, "proj.lib.collideMe");
+    const ctx_gbuf_node_t *lf = ctx_gbuf_find_by_qn(dst_local_first, "proj.lib.collideMe");
+    int rf_line = rf ? rf->start_line : -1;
+    int lf_line = lf ? lf->start_line : -1;
+    char rf_file[64] = {0};
+    char lf_file[64] = {0};
+    if (rf && rf->file_path)
+        snprintf(rf_file, sizeof(rf_file), "%s", rf->file_path);
+    if (lf && lf->file_path)
+        snprintf(lf_file, sizeof(lf_file), "%s", lf->file_path);
+    int rf_nodes = ctx_gbuf_node_count(dst_real_first);
+    int lf_nodes = ctx_gbuf_node_count(dst_local_first);
+    /* The scope-local node's edge was remapped onto the surviving node. */
+    const ctx_gbuf_edge_t **edges = NULL;
+    int edge_count = 0;
+    if (rf)
+        ctx_gbuf_find_edges_by_source_type(dst_real_first, rf->id, "CALLS", &edges, &edge_count);
+
+    ctx_gbuf_free(w_real);
+    ctx_gbuf_free(w_local);
+    ctx_gbuf_free(dst_real_first);
+    ctx_gbuf_free(dst_local_first);
+
+    /* Real merged first — the scope-local merge must not touch it. */
+    ASSERT_EQ(rf_line, 4);
+    ASSERT_STR_EQ(rf_file, "lib.ts");
+    /* Scope-local merged first — the real definition must take the node over. */
+    ASSERT_EQ(lf_line, 4);
+    ASSERT_STR_EQ(lf_file, "lib.ts");
+    /* One QN, one node, either way. */
+    ASSERT_EQ(rf_nodes, 1);
+    ASSERT_EQ(lf_nodes, 1);
+    ASSERT_EQ(edge_count, 1);
+    PASS();
+}
+
 TEST(gbuf_next_id_accessors) {
     ctx_gbuf_t *gb = ctx_gbuf_new("proj", "/");
     ASSERT_EQ(ctx_gbuf_next_id(gb), 1);
@@ -718,6 +787,29 @@ static int setup_scope_local_repo(void) {
                       "export function dupLate() { return 0; }\n") != 0) /* 4 */
         return -1;
 
+    /* lib.ts + lib/index.ts — the SAME collision across two files. A named def
+     * drops a trailing `index` path segment from its FQN, so both files produce
+     * `scope-test.lib.collideMe`: lib.ts on line 4 (the real export) and
+     * lib/index.ts on line 2 (a describe-block closure). On the parallel path
+     * the two files can land in different workers, so this collision is only
+     * ever seen by ctx_gbuf_merge. */
+    if (write_fixture(g_scope_tmpdir, "lib.ts",
+                      "export function pad() { return 0; }\n"        /* 1 */
+                      "\n"                                           /* 2 */
+                      "\n"                                           /* 3 */
+                      "export function collideMe() { return 1; }\n") /* 4 */
+        != 0)
+        return -1;
+
+    char libdir[512];
+    snprintf(libdir, sizeof(libdir), "%s/lib", g_scope_tmpdir);
+    ctx_mkdir(libdir);
+    if (write_fixture(libdir, "index.ts",
+                      "describe(\"suite\", () => {\n"                 /* 1 */
+                      "  const collideMe = () => { return 99; };\n"   /* 2 */
+                      "});\n") != 0)                                  /* 3 */
+        return -1;
+
     /* a.py — class Local declared inside a method body. */
     if (write_fixture(g_scope_tmpdir, "a.py",
                       "class Outer:\n"
@@ -757,6 +849,20 @@ static int count_edges_between(ctx_gbuf_t *gbuf, const char *src_qn, const char 
 static int node_start_line(ctx_gbuf_t *gbuf, const char *qn) {
     const ctx_gbuf_node_t *node = ctx_gbuf_find_by_qn(gbuf, qn);
     return node ? node->start_line : -1;
+}
+
+/* 1 when the node exists and its file_path is exactly `want`. */
+static int node_file_is(ctx_gbuf_t *gbuf, const char *qn, const char *want) {
+    const ctx_gbuf_node_t *node = ctx_gbuf_find_by_qn(gbuf, qn);
+    return node && node->file_path && strcmp(node->file_path, want) == 0;
+}
+
+/* How many nodes carry this short name. */
+static int node_count_by_name(ctx_gbuf_t *gbuf, const char *name) {
+    const ctx_gbuf_node_t **nodes = NULL;
+    int count = 0;
+    ctx_gbuf_find_by_name(gbuf, name, &nodes, &count);
+    return count;
 }
 
 /* Run both pipeline paths over the scope-local fixture. Returns -1 on setup
@@ -841,6 +947,77 @@ TEST(scope_local_def_does_not_clobber_toplevel_node) {
     PASS();
 }
 
+enum { PAR_COLLIDE_RUNS = 8 };
+
+/* Same clobber, but the two colliding definitions live in DIFFERENT files
+ * (lib.ts line 4 vs lib/index.ts line 2, folded to one QN because a named def
+ * drops a trailing `index` segment). scope_local_def_does_not_clobber_toplevel_node
+ * cannot catch this: all of its collisions are intra-file, so they are always
+ * resolved inside a single worker's local gbuf. Here the two files can land in
+ * different workers, and the collision surfaces only in ctx_gbuf_merge — which
+ * overwrote unconditionally, so the closure won whenever its worker merged last.
+ *
+ * Worker→file assignment comes from a shared atomic counter, so a single
+ * parallel run may or may not split the pair; repeat the run so the split is
+ * actually exercised. The sequential path is asserted on the same fixture, so
+ * the two can never silently diverge again. */
+TEST(scope_local_cross_file_collision_owned_by_real_def) {
+    if (setup_scope_local_repo() != 0)
+        SKIP("setup failed");
+    ctx_discover_opts_t opts = {.mode = CTX_MODE_FULL};
+    ctx_file_info_t *files = NULL;
+    int file_count = 0;
+    if (ctx_discover(g_scope_tmpdir, &opts, &files, &file_count) != 0) {
+        rm_rf(g_scope_tmpdir);
+        SKIP("discover failed");
+    }
+
+    ctx_gbuf_t *seq = run_sequential("scope-test", g_scope_tmpdir, files, file_count);
+    int seq_line = node_start_line(seq, "scope-test.lib.collideMe");
+    int seq_file_ok = node_file_is(seq, "scope-test.lib.collideMe", "lib.ts");
+    /* Guards the fixture: if the two files ever stop folding to one QN there
+     * would be two collideMe nodes and this test would prove nothing. */
+    int seq_named = node_count_by_name(seq, "collideMe");
+    ctx_gbuf_free(seq);
+
+    /* Repeated because worker/file assignment is a shared atomic counter: a
+     * single run may not split the colliding pair across the two workers, and
+     * detecting the pre-fix regression needs both a split AND the scope-local
+     * side merging last. So a green run here is not by itself evidence that
+     * the interesting interleaving occurred — it can pass by luck. It can
+     * never fail spuriously (every assertion is a == 0 counter). The real,
+     * deterministic guard is gbuf_merge_scope_local_never_clobbers, which
+     * drives both merge orders directly; this one is the end-to-end companion. */
+    int par_bad_line = 0;
+    int par_bad_file = 0;
+    int par_bad_named = 0;
+    for (int i = 0; i < PAR_COLLIDE_RUNS; i++) {
+        ctx_gbuf_t *par = run_parallel("scope-test", g_scope_tmpdir, files, file_count, 2);
+        if (node_start_line(par, "scope-test.lib.collideMe") != 4)
+            par_bad_line++;
+        if (!node_file_is(par, "scope-test.lib.collideMe", "lib.ts"))
+            par_bad_file++;
+        /* Accumulated, not assigned: assigning would only ever report the
+         * final run and silently drop a mid-loop fixture breakage. */
+        if (node_count_by_name(par, "collideMe") != 1)
+            par_bad_named++;
+        ctx_gbuf_free(par);
+    }
+
+    ctx_discover_free(files, file_count);
+    rm_rf(g_scope_tmpdir);
+
+    /* One QN for both files — otherwise there is no collision to test. */
+    ASSERT_EQ(seq_named, 1);
+    ASSERT_EQ(par_bad_named, 0);
+    /* The real, module-level export owns the node on both paths. */
+    ASSERT_EQ(seq_line, 4);
+    ASSERT_TRUE(seq_file_ok);
+    ASSERT_EQ(par_bad_line, 0);
+    ASSERT_EQ(par_bad_file, 0);
+    PASS();
+}
+
 /* I3: a class declared in a method body got a function-scoped QN, but
  * registry-exclusion and ENCLOSES both keyed on parent_function, which only
  * extract_func_def used to set — so the class was both project-wide resolvable
@@ -884,6 +1061,7 @@ SUITE(parallel) {
     RUN_TEST(gbuf_merge_edges);
     RUN_TEST(gbuf_merge_empty_src);
     RUN_TEST(gbuf_merge_src_free_safe);
+    RUN_TEST(gbuf_merge_scope_local_never_clobbers);
     RUN_TEST(gbuf_next_id_accessors);
 
     /* Parallel pipeline parity tests */
@@ -906,6 +1084,7 @@ SUITE(parallel) {
     /* Scope-local definitions: registry exclusion + node ownership */
     RUN_TEST(scope_local_def_not_cross_file_resolvable);
     RUN_TEST(scope_local_def_does_not_clobber_toplevel_node);
+    RUN_TEST(scope_local_cross_file_collision_owned_by_real_def);
     RUN_TEST(function_local_class_not_cross_file_resolvable);
 
     /* Cleanup shared state */
