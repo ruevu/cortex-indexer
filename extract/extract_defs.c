@@ -3351,11 +3351,24 @@ static void push_class_body_children(TSNode node, const CtxLangSpec *spec, walk_
 // frame stack rather than putting it on the C stack, so this recursion's
 // C-stack cost per level is a few words, not CTX_WALK_DEFS_STACK_CAP frames
 // — nesting depth here is unbounded by design (no depth cap).
+//
+// owner_qn may legitimately be NULL: a top-level *anonymous* callable (an
+// IIFE, or a callback literal passed directly to a call — e.g. a
+// `describe("...", () => { ... })` block) has no name, so extract_func_def
+// returns NULL and the caller's own enclosing scope is already NULL (module
+// scope). NULL is not "no owner", it IS the owner — module scope — so we
+// must still descend: definitions found here get flat module-level QNs via
+// ctx_fqn_compute (see extract_func_def's `ctx->enclosing_func_qn ? ... :
+// ctx_fqn_compute(...)` branch), which is exactly what compute_func_qn in
+// extract_unified.c computes for calls inside the same body (its
+// innermost_owner_qn finds no pushed scope for the anonymous callable
+// either, since push_boundary_scopes only pushes a scope when compute_func_qn
+// returns non-NULL). The two walkers agree by construction. Bailing out here
+// used to silently skip every definition nested inside a top-level anonymous
+// callable — the dominant real-world shape being test files (`describe`/`it`
+// blocks), whose bodies were never walked at all.
 static void walk_nested_defs(CtxExtractCtx *ctx, TSNode owner_node, const CtxLangSpec *spec,
                              const char *owner_qn) {
-    if (!owner_qn) {
-        return;
-    }
     const char *saved_func = ctx->enclosing_func_qn;
     const char *saved_class = ctx->enclosing_class_qn;
     ctx->enclosing_func_qn = owner_qn;

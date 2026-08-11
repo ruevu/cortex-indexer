@@ -2591,6 +2591,32 @@ TEST(nested_call_attributes_to_nested_fn) {
     PASS();
 }
 
+TEST(nested_def_inside_toplevel_anonymous_callback) {
+    /* Dominant real-world shape: a test file's outermost `describe(...)`
+     * callback is anonymous (no name to hang a QN off), so its enclosing
+     * scope is module scope, not a pushed function scope. Before the fix,
+     * walk_nested_defs bailed the instant owner_qn came back NULL for that
+     * top-level anonymous callable, so `helper` was never walked at all --
+     * it got no definition node, and its call to `target` fell back to the
+     * file node instead of a function-sourced CALLS edge. `helper` must get
+     * a flat module-level QN (t.spec.helper), matching what the call-site
+     * scope tracker (compute_func_qn/innermost_owner_qn in
+     * extract_unified.c) already computes for calls inside it, since it
+     * also finds no pushed scope for the anonymous describe callback. */
+    CtxFileResult *r = extract("describe(\"suite\", () => {\n"
+                               "  const helper = () => { target(); };\n"
+                               "  it(\"works\", () => { helper(); });\n"
+                               "});\n",
+                               CTX_LANG_TYPESCRIPT, "t", "spec.ts");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    ASSERT(has_def_qn(r, "Function", "t.spec.helper"));
+    ASSERT_STR_EQ(call_scope_of(r, "target"), "t.spec.helper");
+    ASSERT_STR_EQ(call_scope_of(r, "helper"), "t.spec");
+    ctx_free_result(r);
+    PASS();
+}
+
 TEST(nested_call_in_anonymous_cb_keeps_outer_scope) {
     CtxFileResult *r = extract("export function outerCaller(items) {\n"
                                "  items.forEach(x => { doThing(x); });\n"
@@ -2963,6 +2989,7 @@ SUITE(extraction) {
     RUN_TEST(nested_same_name_in_two_functions);
     RUN_TEST(nested_same_name_class_in_two_functions);
     RUN_TEST(nested_call_attributes_to_nested_fn);
+    RUN_TEST(nested_def_inside_toplevel_anonymous_callback);
     RUN_TEST(nested_call_in_anonymous_cb_keeps_outer_scope);
     RUN_TEST(nested_call_in_class_nested_in_function_chains_fully);
     RUN_TEST(nested_call_in_class_nested_in_class_chains_fully);
