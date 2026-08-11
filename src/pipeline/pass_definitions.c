@@ -186,6 +186,7 @@ static void build_def_props(char *buf, size_t bufsize, const CtxDefinition *def)
     append_json_string(buf, bufsize, &pos, "signature", def->signature);
     append_json_string(buf, bufsize, &pos, "return_type", def->return_type);
     append_json_string(buf, bufsize, &pos, "parent_class", def->parent_class);
+    append_json_string(buf, bufsize, &pos, "parent_function", def->parent_function);
     append_json_str_array(buf, bufsize, &pos, "decorators", def->decorators);
     append_json_str_array(buf, bufsize, &pos, "base_classes", def->base_classes);
     append_json_str_array(buf, bufsize, &pos, "param_names", def->param_names);
@@ -229,8 +230,11 @@ static void process_def(ctx_pipeline_ctx_t *ctx, const CtxDefinition *def, const
         def->file_path ? def->file_path : rel, (int)def->start_line, (int)def->end_line, props);
     /* Register callable symbols + Interface.  Interface must be in the registry
      * so C#/Java `class Foo : IBar` / `class Foo implements IBar` can resolve
-     * `IBar` to an INHERITS edge target during the enrichment phase. */
-    if (node_id > 0 && def->label &&
+     * `IBar` to an INHERITS edge target during the enrichment phase.
+     * Nested definitions are deliberately excluded: a closure is only callable
+     * from inside its enclosing scope, so a project-wide name match to one is
+     * always wrong and would make previously-unique names ambiguous. */
+    if (node_id > 0 && def->label && !def->parent_function &&
         (strcmp(def->label, "Function") == 0 || strcmp(def->label, "Method") == 0 ||
          strcmp(def->label, "Class") == 0 || strcmp(def->label, "Interface") == 0)) {
         ctx_registry_add(ctx->registry, def->name, def->qualified_name, def->label);
@@ -245,6 +249,12 @@ static void process_def(ctx_pipeline_ctx_t *ctx, const CtxDefinition *def, const
         const ctx_gbuf_node_t *parent = ctx_gbuf_find_by_qn(ctx->gbuf, def->parent_class);
         if (parent && node_id > 0) {
             ctx_gbuf_insert_edge(ctx->gbuf, parent->id, node_id, "DEFINES_METHOD", "{}");
+        }
+    }
+    if (def->parent_function) {
+        const ctx_gbuf_node_t *owner = ctx_gbuf_find_by_qn(ctx->gbuf, def->parent_function);
+        if (owner && node_id > 0) {
+            ctx_gbuf_insert_edge(ctx->gbuf, owner->id, node_id, "ENCLOSES", "{}");
         }
     }
 }

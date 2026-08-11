@@ -558,6 +558,110 @@ TEST(parallel_nuxt_route_handles) {
     PASS();
 }
 
+/* ── Nested definitions (spec 2026-08-10) ─────────────────────────── */
+
+static char g_nest_tmpdir[256];
+
+static int setup_nested_repo(void) {
+    snprintf(g_nest_tmpdir, sizeof(g_nest_tmpdir), "/tmp/ctx_nest_XXXXXX");
+    if (!ctx_mkdtemp(g_nest_tmpdir))
+        return -1;
+    char path[512];
+
+    snprintf(path, sizeof(path), "%s/lib.ts", g_nest_tmpdir);
+    FILE *f = fopen(path, "w");
+    if (!f)
+        return -1;
+    fprintf(f, "export function helper() { return 0; }\n"
+               "export function useHelper() { return helper(); }\n");
+    fclose(f);
+
+    snprintf(path, sizeof(path), "%s/a.ts", g_nest_tmpdir);
+    f = fopen(path, "w");
+    if (!f)
+        return -1;
+    fprintf(f, "export function alpha() {\n"
+               "  const helper = () => 1;\n"
+               "  return helper();\n"
+               "}\n");
+    fclose(f);
+    return 0;
+}
+
+TEST(nested_defs_enclose_and_skip_registry) {
+    if (setup_nested_repo() != 0)
+        SKIP("setup failed");
+
+    ctx_discover_opts_t opts = {.mode = CTX_MODE_FULL};
+    ctx_file_info_t *files = NULL;
+    int file_count = 0;
+    if (ctx_discover(g_nest_tmpdir, &opts, &files, &file_count) != 0) {
+        rm_rf(g_nest_tmpdir);
+        SKIP("discover failed");
+    }
+
+    ctx_gbuf_t *gbuf = run_parallel("nest-test", g_nest_tmpdir, files, file_count, 2);
+    ctx_discover_free(files, file_count);
+
+    /* The closure is a node, scoped under its enclosing function... */
+    const ctx_gbuf_node_t *closure = ctx_gbuf_find_by_qn(gbuf, "nest-test.a.alpha.helper");
+    ASSERT_NOT_NULL(closure);
+    /* ...and linked to it. */
+    ASSERT_EQ(ctx_gbuf_edge_count_by_type(gbuf, "ENCLOSES"), 1);
+
+    /* Nothing resolves TO the closure — it is not in the symbol registry. */
+    const ctx_gbuf_edge_t **into_closure = NULL;
+    int closure_callers = 0;
+    ctx_gbuf_find_edges_by_target_type(gbuf, closure->id, "CALLS", &into_closure,
+                                       &closure_callers);
+    ASSERT_EQ(closure_callers, 0);
+
+    /* The top-level helper still owns the name. */
+    const ctx_gbuf_node_t *top = ctx_gbuf_find_by_qn(gbuf, "nest-test.lib.helper");
+    ASSERT_NOT_NULL(top);
+    const ctx_gbuf_edge_t **into_top = NULL;
+    int top_callers = 0;
+    ctx_gbuf_find_edges_by_target_type(gbuf, top->id, "CALLS", &into_top, &top_callers);
+    ASSERT_GTE(top_callers, 1);
+
+    ctx_gbuf_free(gbuf);
+    rm_rf(g_nest_tmpdir);
+    PASS();
+}
+
+/* ENCLOSES has no coverage in the shared parity-test group above: that group's
+ * fixture (setup_parallel_repo, three Go files) has no nested definitions, so
+ * an ENCLOSES parity assertion against it would be a vacuous 0 == 0. Run both
+ * pipeline paths over the nested fixture instead, and require the shared
+ * non-zero count the brief calls for — not just that they agree. */
+TEST(nested_defs_encloses_parity) {
+    if (setup_nested_repo() != 0)
+        SKIP("setup failed");
+
+    ctx_discover_opts_t opts = {.mode = CTX_MODE_FULL};
+    ctx_file_info_t *files = NULL;
+    int file_count = 0;
+    if (ctx_discover(g_nest_tmpdir, &opts, &files, &file_count) != 0) {
+        rm_rf(g_nest_tmpdir);
+        SKIP("discover failed");
+    }
+
+    ctx_gbuf_t *seq_gbuf = run_sequential("nest-test", g_nest_tmpdir, files, file_count);
+    ctx_gbuf_t *par_gbuf = run_parallel("nest-test", g_nest_tmpdir, files, file_count, 2);
+    ctx_discover_free(files, file_count);
+
+    int seq_encloses = ctx_gbuf_edge_count_by_type(seq_gbuf, "ENCLOSES");
+    int par_encloses = ctx_gbuf_edge_count_by_type(par_gbuf, "ENCLOSES");
+
+    ctx_gbuf_free(seq_gbuf);
+    ctx_gbuf_free(par_gbuf);
+    rm_rf(g_nest_tmpdir);
+
+    ASSERT_EQ(seq_encloses, 1);
+    ASSERT_EQ(par_encloses, 1);
+    PASS();
+}
+
 /* ── Suite Registration ──────────────────────────────────────────── */
 
 SUITE(parallel) {
@@ -583,6 +687,8 @@ SUITE(parallel) {
 
     /* Parallel-path Route + HANDLES creation (Nuxt routes) */
     RUN_TEST(parallel_nuxt_route_handles);
+    RUN_TEST(nested_defs_enclose_and_skip_registry);
+    RUN_TEST(nested_defs_encloses_parity);
 
     /* Cleanup shared state */
     parity_teardown();

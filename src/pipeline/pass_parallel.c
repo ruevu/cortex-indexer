@@ -210,6 +210,7 @@ static void build_def_props(char *buf, size_t bufsize, const CtxDefinition *def)
     append_json_string(buf, bufsize, &pos, "signature", def->signature);
     append_json_string(buf, bufsize, &pos, "return_type", def->return_type);
     append_json_string(buf, bufsize, &pos, "parent_class", def->parent_class);
+    append_json_string(buf, bufsize, &pos, "parent_function", def->parent_function);
     append_json_str_array(buf, bufsize, &pos, "decorators", def->decorators);
     append_json_str_array(buf, bufsize, &pos, "base_classes", def->base_classes);
     append_json_str_array(buf, bufsize, &pos, "param_names", def->param_names);
@@ -668,9 +669,12 @@ static int register_and_link_def(ctx_pipeline_ctx_t *ctx, const CtxDefinition *d
     if (!def->name || !def->qualified_name || !def->label) {
         return 0;
     }
-    /* Register callable symbols + Interface — see pass_definitions.c for rationale. */
-    if (strcmp(def->label, "Function") == 0 || strcmp(def->label, "Method") == 0 ||
-        strcmp(def->label, "Class") == 0 || strcmp(def->label, "Interface") == 0) {
+    /* Register callable symbols + Interface — see pass_definitions.c for rationale.
+     * Nested definitions are deliberately excluded from the registry (closures
+     * are not project-wide-callable) — see pass_definitions.c for rationale. */
+    if (!def->parent_function &&
+        (strcmp(def->label, "Function") == 0 || strcmp(def->label, "Method") == 0 ||
+         strcmp(def->label, "Class") == 0 || strcmp(def->label, "Interface") == 0)) {
         ctx_registry_add(ctx->registry, def->name, def->qualified_name, def->label);
         (*reg_entries)++;
     }
@@ -686,6 +690,12 @@ static int register_and_link_def(ctx_pipeline_ctx_t *ctx, const CtxDefinition *d
         const ctx_gbuf_node_t *parent = ctx_gbuf_find_by_qn(ctx->gbuf, def->parent_class);
         if (parent && def_node) {
             ctx_gbuf_insert_edge(ctx->gbuf, parent->id, def_node->id, "DEFINES_METHOD", "{}");
+        }
+    }
+    if (def->parent_function) {
+        const ctx_gbuf_node_t *owner = ctx_gbuf_find_by_qn(ctx->gbuf, def->parent_function);
+        if (owner && def_node) {
+            ctx_gbuf_insert_edge(ctx->gbuf, owner->id, def_node->id, "ENCLOSES", "{}");
         }
     }
     return edges;
