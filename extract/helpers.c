@@ -472,19 +472,54 @@ static const char *func_node_name(CtxArena *a, TSNode func_node, const char *sou
     return NULL;
 }
 
-const char *ctx_enclosing_func_qn(CtxArena *a, TSNode node, CtxLanguage lang, const char *source,
-                                  const char *project, const char *rel_path,
-                                  const char *module_qn) {
-    TSNode func_node = ctx_find_enclosing_func(node, lang);
-    if (ts_node_is_null(func_node)) {
-        return module_qn;
-    }
-    const char *name = func_node_name(a, func_node, source, lang);
-    if (!name || !name[0]) {
-        return module_qn;
+// Compute a function node's own fully-qualified QN given its already-resolved
+// name. Chains onto the nearest enclosing callable, then the class, then the
+// file — mirrors the scope order in extract_unified.c's compute_func_qn.
+//
+// This is deliberately NOT "call ctx_enclosing_func_qn(a, outer, ...)": that
+// function treats its `node` argument as a position and starts its own
+// ctx_find_enclosing_func search from that node's PARENT (skipping the node
+// itself), so feeding it an already-resolved function node would ask "what
+// encloses outer" instead of "what is outer's own QN" — for a top-level
+// outer function that's always NULL, so the caller would silently collapse
+// back to the flat/file-level QN, which is the exact bug this function
+// exists to fix. Resolving outer's name here and recursing on this helper
+// (not the public function) keeps the position-based and node-based cases
+// from being conflated.
+//
+// Recursion strictly ascends the AST (each call's func_node is a proper
+// ancestor of the previous one via ctx_find_enclosing_func), so it cannot
+// loop on a malformed tree and terminates in at most the source's nesting
+// depth — bounded in practice by nested_deep_nesting_no_stack_overflow.
+static const char *ctx_func_scope_qn(CtxArena *a, TSNode func_node, const char *name,
+                                     CtxLanguage lang, const char *source, const char *project,
+                                     const char *rel_path, const char *module_qn) {
+    // Ascend past any unnamed enclosing callables instead of stopping at the
+    // first one and falling through to the class/flat fallback below. For
+    // `outer(){ arr.forEach(() => { function deep(){} }) }`, the nearest
+    // enclosing callable to `deep` is the anonymous arrow — stopping there
+    // (as this loop used to) discards `outer` entirely and yields a flat
+    // `deep`, where both the live WalkState walker and walk_defs correctly
+    // yield `outer.deep`. WalkState achieves this by simply never pushing a
+    // scope for an unnamed function, so enclosing_func_qn transparently
+    // skips over it to whatever named scope was active before it; this loop
+    // mirrors that by continuing the ascent from each unnamed callable
+    // instead of returning at it.
+    TSNode outer = func_node;
+    for (;;) {
+        outer = ctx_find_enclosing_func(outer, lang);
+        if (ts_node_is_null(outer)) {
+            break;
+        }
+        const char *outer_name = func_node_name(a, outer, source, lang);
+        if (outer_name && outer_name[0]) {
+            const char *outer_qn = ctx_func_scope_qn(a, outer, outer_name, lang, source, project,
+                                                      rel_path, module_qn);
+            return ctx_fqn_scoped(a, outer_qn, name);
+        }
+        // outer is unnamed -- keep ascending from it rather than giving up.
     }
 
-    // Check if the function is inside a class — compute classQN.funcName
     const CtxLangSpec *spec = ctx_lang_spec(lang);
     if (spec && spec->class_node_types) {
         TSNode cur = ts_node_parent(func_node);
@@ -504,6 +539,32 @@ const char *ctx_enclosing_func_qn(CtxArena *a, TSNode node, CtxLanguage lang, co
     }
 
     return ctx_fqn_compute(a, project, rel_path, name);
+}
+
+// NOTE (currently unreachable in the shipped indexer): this function is only
+// called via ctx_enclosing_func_qn_cached, whose only callers are the
+// standalone ctx_extract_calls / ctx_extract_usages / ctx_extract_semantic /
+// ctx_extract_env_accesses / ctx_extract_type_assigns extractors — and none
+// of those has a call site since ctx_extract_unified's single WalkState-based
+// walk (extract_unified.c) superseded them. Live call/usage/throw/env-access/
+// type-assign attribution goes through state->enclosing_func_qn there
+// instead. Kept correct (not deleted) so that if those extractors are ever
+// revived, they inherit the fixed scoped-chain behavior below rather than
+// reintroducing the flat-QN bug this function used to have. See
+// .superpowers/sdd/2026-08-10-nested-definitions/task-4-report.md.
+const char *ctx_enclosing_func_qn(CtxArena *a, TSNode node, CtxLanguage lang, const char *source,
+                                  const char *project, const char *rel_path,
+                                  const char *module_qn) {
+    TSNode func_node = ctx_find_enclosing_func(node, lang);
+    if (ts_node_is_null(func_node)) {
+        return module_qn;
+    }
+    const char *name = func_node_name(a, func_node, source, lang);
+    if (!name || !name[0]) {
+        return module_qn;
+    }
+
+    return ctx_func_scope_qn(a, func_node, name, lang, source, project, rel_path, module_qn);
 }
 
 // --- Cached enclosing function QN ---
@@ -770,6 +831,13 @@ char *ctx_fqn_compute(CtxArena *a, const char *project, const char *rel_path, co
     }
     *out = '\0';
     return buf;
+}
+
+char *ctx_fqn_scoped(CtxArena *a, const char *parent_qn, const char *name) {
+    if (!parent_qn || !name || !name[0]) {
+        return NULL;
+    }
+    return ctx_arena_sprintf(a, "%s.%s", parent_qn, name);
 }
 
 char *ctx_fqn_module(CtxArena *a, const char *project, const char *rel_path) {

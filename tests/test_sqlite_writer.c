@@ -12,6 +12,7 @@
 /* sqlite_writer.h is at extract/ — Makefile adds -Iextract */
 #include "sqlite_writer.h" /* CtxDumpNode, CtxDumpEdge, ctx_write_db */
 #include "sqlite3.h"       /* vendored/sqlite3/ via -Ivendored/sqlite3 */
+#include "store/store.h"   /* CTX_EXTRACT_SCHEMA */
 #include <unistd.h>
 
 /* ── Helper: create temp file path ─────────────────────────────── */
@@ -95,6 +96,15 @@ TEST(sw_minimal_data) {
     sqlite3_step(stmt);
     ASSERT_STR_EQ((const char *)sqlite3_column_text(stmt, 0), "test");
     ASSERT_STR_EQ((const char *)sqlite3_column_text(stmt, 1), "/tmp/test");
+    sqlite3_finalize(stmt);
+
+    /* extract_schema: stamped directly by the bulk B-tree writer (spec
+     * 2026-08-10 Task 6 fix, round 1) — must equal CTX_EXTRACT_SCHEMA, not
+     * the column's DEFAULT 0, or incremental indexing is permanently
+     * disabled on every fresh index. */
+    sqlite3_prepare_v2(db, "SELECT extract_schema FROM ctx_projects", -1, &stmt, NULL);
+    sqlite3_step(stmt);
+    ASSERT_EQ(sqlite3_column_int(stmt, 0), CTX_EXTRACT_SCHEMA);
     sqlite3_finalize(stmt);
 
     /* Node content: check node 2 (ids are TEXT 'ctx-<int>' post-Phase-4) */

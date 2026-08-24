@@ -28,6 +28,37 @@ static int has_def_any(CtxFileResult *r, const char *name) {
     return 0;
 }
 
+/* Check if any definition with the given label has the given qualified name. */
+static int has_def_qn(CtxFileResult *r, const char *label, const char *qn) {
+    for (int i = 0; i < r->defs.count; i++) {
+        if (strcmp(r->defs.items[i].label, label) == 0 &&
+            r->defs.items[i].qualified_name &&
+            strcmp(r->defs.items[i].qualified_name, qn) == 0)
+            return 1;
+    }
+    return 0;
+}
+
+/* Return the parent_function of the first def with the given short name.
+ * Returns NULL when the def is absent or is not nested. */
+static const char *def_parent_of(CtxFileResult *r, const char *name) {
+    for (int i = 0; i < r->defs.count; i++) {
+        if (strcmp(r->defs.items[i].name, name) == 0)
+            return r->defs.items[i].parent_function;
+    }
+    return NULL;
+}
+
+/* Return 1/0 for the scope_local flag of the first def with the given short
+ * name; -1 when no such def exists. */
+static int def_is_scope_local(CtxFileResult *r, const char *name) {
+    for (int i = 0; i < r->defs.count; i++) {
+        if (strcmp(r->defs.items[i].name, name) == 0)
+            return r->defs.items[i].scope_local ? 1 : 0;
+    }
+    return -1;
+}
+
 /* Check if any call to the given callee exists. */
 static int has_call(CtxFileResult *r, const char *callee) {
     for (int i = 0; i < r->calls.count; i++) {
@@ -35,6 +66,16 @@ static int has_call(CtxFileResult *r, const char *callee) {
             return 1;
     }
     return 0;
+}
+
+/* Return the enclosing_func_qn of the first call to the given callee. */
+static const char *call_scope_of(CtxFileResult *r, const char *callee) {
+    for (int i = 0; i < r->calls.count; i++) {
+        if (r->calls.items[i].callee_name &&
+            strcmp(r->calls.items[i].callee_name, callee) == 0)
+            return r->calls.items[i].enclosing_func_qn;
+    }
+    return NULL;
 }
 
 /* Check if any import with the given module path exists. */
@@ -876,6 +917,22 @@ TEST(cpp_function) {
     ASSERT_NOT_NULL(r);
     ASSERT_FALSE(r->has_error);
     ASSERT_GTE(r->defs.count, 1);
+    ctx_free_result(r);
+    PASS();
+}
+
+/* --- C++ template function: must not be double-extracted (spec 2026-08-10) ---
+ * template_declaration and its inner function_definition are both in
+ * cpp_func_types, so walking into the wrapper's own children (instead of
+ * the unwrapped inner function's children) re-visits and re-extracts the
+ * inner function_definition as a bogus nested duplicate ("add.add"). */
+TEST(nested_cpp_template_not_duplicated) {
+    CtxFileResult *r = extract("template<typename T> T add(T a, T b) { return a + b; }\n",
+                               CTX_LANG_CPP, "t", "t2.cpp");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    ASSERT_EQ(count_defs_with_label(r, "Function"), 1);
+    ASSERT(has_def_qn(r, "Function", "t.t2.add"));
     ctx_free_result(r);
     PASS();
 }
@@ -2455,6 +2512,383 @@ TEST(python_regular_module_qn_unchanged) {
     PASS();
 }
 
+/* ── Nested definitions (spec 2026-08-10) ──────────────────────── */
+
+TEST(nested_toplevel_qn_unchanged) {
+    CtxFileResult *r = extract("export function outerTs() { return 1; }\n"
+                               "export const topArrowTs = () => 9;\n",
+                               CTX_LANG_TYPESCRIPT, "t", "app.ts");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    ASSERT(has_def_qn(r, "Function", "t.app.outerTs"));
+    ASSERT(has_def_qn(r, "Function", "t.app.topArrowTs"));
+    ASSERT_NULL(def_parent_of(r, "outerTs"));
+    ASSERT_NULL(def_parent_of(r, "topArrowTs"));
+    ctx_free_result(r);
+    PASS();
+}
+
+TEST(nested_method_qn_unchanged) {
+    CtxFileResult *r = extract("class Klass { start() { return 1; } }\n",
+                               CTX_LANG_TYPESCRIPT, "t", "app.ts");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    ASSERT(has_def_qn(r, "Method", "t.app.Klass.start"));
+    ASSERT_NULL(def_parent_of(r, "start"));
+    ctx_free_result(r);
+    PASS();
+}
+
+TEST(nested_ts_arrow_and_fn_decl) {
+    CtxFileResult *r = extract("export function outerTs() {\n"
+                               "  const nestedArrowTs = () => 1;\n"
+                               "  function nestedFnDeclTs() { return 2; }\n"
+                               "  return nestedArrowTs() + nestedFnDeclTs();\n"
+                               "}\n",
+                               CTX_LANG_TYPESCRIPT, "t", "app.ts");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    ASSERT(has_def_qn(r, "Function", "t.app.outerTs.nestedArrowTs"));
+    ASSERT(has_def_qn(r, "Function", "t.app.outerTs.nestedFnDeclTs"));
+    ASSERT_STR_EQ(def_parent_of(r, "nestedArrowTs"), "t.app.outerTs");
+    ASSERT_STR_EQ(def_parent_of(r, "nestedFnDeclTs"), "t.app.outerTs");
+    ctx_free_result(r);
+    PASS();
+}
+
+TEST(nested_same_name_in_two_functions) {
+    CtxFileResult *r = extract("export function alpha() { const helper = () => 1; return helper(); }\n"
+                               "export function beta()  { const helper = () => 2; return helper(); }\n",
+                               CTX_LANG_TYPESCRIPT, "t", "k.ts");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    ASSERT(has_def_qn(r, "Function", "t.k.alpha.helper"));
+    ASSERT(has_def_qn(r, "Function", "t.k.beta.helper"));
+    ctx_free_result(r);
+    PASS();
+}
+
+TEST(nested_same_name_class_in_two_functions) {
+    CtxFileResult *r = extract("export function outer() {\n"
+                               "  class Local { m() { return 1; } }\n"
+                               "  return new Local().m();\n"
+                               "}\n"
+                               "export function outer2() {\n"
+                               "  class Local { m() { return 2; } }\n"
+                               "  return new Local().m();\n"
+                               "}\n",
+                               CTX_LANG_TYPESCRIPT, "t", "dup.ts");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    ASSERT(has_def_qn(r, "Class", "t.dup.outer.Local"));
+    ASSERT(has_def_qn(r, "Class", "t.dup.outer2.Local"));
+    ctx_free_result(r);
+    PASS();
+}
+
+TEST(nested_call_attributes_to_nested_fn) {
+    CtxFileResult *r = extract("export function callerOuter() {\n"
+                               "  targetAlpha();\n"
+                               "  const inner = () => { targetBeta(); };\n"
+                               "  inner();\n"
+                               "}\n",
+                               CTX_LANG_TYPESCRIPT, "t", "t.ts");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    ASSERT_STR_EQ(call_scope_of(r, "targetAlpha"), "t.t.callerOuter");
+    ASSERT_STR_EQ(call_scope_of(r, "targetBeta"), "t.t.callerOuter.inner");
+    ctx_free_result(r);
+    PASS();
+}
+
+TEST(nested_def_inside_toplevel_anonymous_callback) {
+    /* Dominant real-world shape: a test file's outermost `describe(...)`
+     * callback is anonymous (no name to hang a QN off), so its enclosing
+     * scope is module scope, not a pushed function scope. Before the fix,
+     * walk_nested_defs bailed the instant owner_qn came back NULL for that
+     * top-level anonymous callable, so `helper` was never walked at all --
+     * it got no definition node, and its call to `target` fell back to the
+     * file node instead of a function-sourced CALLS edge. `helper` must get
+     * a flat module-level QN (t.spec.helper), matching what the call-site
+     * scope tracker (compute_func_qn/innermost_owner_qn in
+     * extract_unified.c) already computes for calls inside it, since it
+     * also finds no pushed scope for the anonymous describe callback. */
+    CtxFileResult *r = extract("describe(\"suite\", () => {\n"
+                               "  const helper = () => { target(); };\n"
+                               "  it(\"works\", () => { helper(); });\n"
+                               "});\n",
+                               CTX_LANG_TYPESCRIPT, "t", "spec.ts");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    ASSERT(has_def_qn(r, "Function", "t.spec.helper"));
+    ASSERT_STR_EQ(call_scope_of(r, "target"), "t.spec.helper");
+    ASSERT_STR_EQ(call_scope_of(r, "helper"), "t.spec");
+    ctx_free_result(r);
+    PASS();
+}
+
+TEST(nested_call_in_anonymous_cb_keeps_outer_scope) {
+    CtxFileResult *r = extract("export function outerCaller(items) {\n"
+                               "  items.forEach(x => { doThing(x); });\n"
+                               "}\n",
+                               CTX_LANG_TYPESCRIPT, "t", "cb.ts");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    ASSERT_STR_EQ(call_scope_of(r, "doThing"), "t.cb.outerCaller");
+    ctx_free_result(r);
+    PASS();
+}
+
+TEST(nested_call_in_class_nested_in_function_chains_fully) {
+    /* class Local nested inside function outer(), method m() inside Local.
+     * The innermost enclosing scope for a call in m() is Local (a class),
+     * not outer() (a function) -- compute_func_qn/compute_class_qn must pick
+     * whichever is actually nearer by depth, not let function scope always
+     * win over class scope. */
+    CtxFileResult *r = extract("export function outer() {\n"
+                               "  class Local {\n"
+                               "    m() { target(); }\n"
+                               "  }\n"
+                               "}\n",
+                               CTX_LANG_TYPESCRIPT, "t", "f.ts");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    ASSERT_STR_EQ(call_scope_of(r, "target"), "t.f.outer.Local.m");
+    ctx_free_result(r);
+    PASS();
+}
+
+TEST(nested_call_in_class_nested_in_class_chains_fully) {
+    /* class Inner nested inside class Outer (no function involved at all) --
+     * compute_class_qn must chain a class onto its enclosing class scope
+     * instead of always falling flat to the module QN. */
+    CtxFileResult *r = extract("class Outer:\n"
+                               "    class Inner:\n"
+                               "        def m(self):\n"
+                               "            target()\n",
+                               CTX_LANG_PYTHON, "t", "n.py");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    ASSERT_STR_EQ(call_scope_of(r, "target"), "t.n.Outer.Inner.m");
+    ctx_free_result(r);
+    PASS();
+}
+
+TEST(nested_class_in_method_of_nested_class_chains_fully) {
+    /* class Local declared in a method of a NESTED class -- the shape that
+     * exposes a stale ctx->enclosing_class_qn. walk_nested_defs must clear the
+     * class scope on the way into m's body: extract_class_def tests
+     * enclosing_class_qn BEFORE enclosing_func_qn, so a leftover outer-class
+     * scope beats the nearer method scope and names the class t.n2.Outer.Local.
+     * The unified walker picks the innermost owner by depth and names it
+     * t.n2.Outer.Inner.m.Local, so the walkers disagree and p's call to target
+     * finds no node for its scope QN and falls back to the file node.
+     * The one-level shape (class in a method of a TOP-LEVEL class) hides this:
+     * enclosing_class_qn happens to be NULL there. */
+    CtxFileResult *r = extract("def target():\n"
+                               "    return 0\n"
+                               "\n"
+                               "class Outer:\n"
+                               "    class Inner:\n"
+                               "        def m(self):\n"
+                               "            class Local:\n"
+                               "                def p(self):\n"
+                               "                    return target()\n",
+                               CTX_LANG_PYTHON, "t", "n2.py");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    ASSERT(has_def_qn(r, "Class", "t.n2.Outer.Inner.m.Local"));
+    ASSERT_FALSE(has_def_qn(r, "Class", "t.n2.Outer.Local"));
+    ASSERT(has_def_qn(r, "Method", "t.n2.Outer.Inner.m.Local.p"));
+    /* The call attributes to the method, not to t.n2.__file__. */
+    ASSERT_STR_EQ(call_scope_of(r, "target"), "t.n2.Outer.Inner.m.Local.p");
+    /* A function-local class carries parent_function, so the pipeline can hang
+     * an ENCLOSES edge off it and keep it out of the symbol registry. */
+    ASSERT_STR_EQ(def_parent_of(r, "Local"), "t.n2.Outer.Inner.m");
+    ctx_free_result(r);
+    PASS();
+}
+
+TEST(nested_def_in_toplevel_anonymous_cb_is_scope_local) {
+    /* A def inside a top-level anonymous callable is module-QN'd by design --
+     * both walkers agree on the flat QN -- so parent_function is NULL. That
+     * makes parent_function useless as a "not project-wide resolvable" test:
+     * scope_local is the separate bit that says so. */
+    CtxFileResult *r = extract("export function realTop() { return 1; }\n"
+                               "describe(\"suite\", () => {\n"
+                               "  const cbLocal = () => 2;\n"
+                               "});\n",
+                               CTX_LANG_TYPESCRIPT, "t", "sl.ts");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    ASSERT(has_def_qn(r, "Function", "t.sl.cbLocal"));
+    ASSERT_NULL(def_parent_of(r, "cbLocal"));
+    ASSERT_EQ(def_is_scope_local(r, "cbLocal"), 1);
+    ASSERT_EQ(def_is_scope_local(r, "realTop"), 0);
+    ctx_free_result(r);
+    PASS();
+}
+
+TEST(nested_anonymous_callback_makes_no_node) {
+    CtxFileResult *r = extract("export function outerCb(items) {\n"
+                               "  items.forEach(x => { doThing(x); });\n"
+                               "}\n",
+                               CTX_LANG_TYPESCRIPT, "t", "cb.ts");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    ASSERT_EQ(count_defs_with_label(r, "Function"), 1);
+    ctx_free_result(r);
+    PASS();
+}
+
+TEST(nested_in_method_body) {
+    CtxFileResult *r = extract("class Klass {\n"
+                               "  start() {\n"
+                               "    const ensureChild = () => 1;\n"
+                               "    return ensureChild();\n"
+                               "  }\n"
+                               "}\n",
+                               CTX_LANG_TYPESCRIPT, "t", "app.ts");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    ASSERT(has_def_qn(r, "Function", "t.app.Klass.start.ensureChild"));
+    ASSERT_STR_EQ(def_parent_of(r, "ensureChild"), "t.app.Klass.start");
+    ctx_free_result(r);
+    PASS();
+}
+
+TEST(nested_deep_nesting_no_stack_overflow) {
+    /* 100 levels of nested named functions. The pre-fix implementation
+     * allocated a 192 KiB frame array per level and overflowed the 8 MB
+     * thread stack at ~42 levels. */
+    enum { DEPTH = 100 };
+    char src[DEPTH * 64 + 64];
+    int pos = 0;
+    for (int i = 0; i < DEPTH; i++)
+        pos += snprintf(src + pos, sizeof(src) - (size_t)pos, "function L%d() {\n", i);
+    for (int i = 0; i < DEPTH; i++)
+        pos += snprintf(src + pos, sizeof(src) - (size_t)pos, "}\n");
+
+    CtxFileResult *r = extract(src, CTX_LANG_TYPESCRIPT, "t", "deep.ts");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    ASSERT_EQ(count_defs_with_label(r, "Function"), DEPTH);
+    ctx_free_result(r);
+    PASS();
+}
+
+TEST(nested_python_def) {
+    CtxFileResult *r = extract("def outer_py():\n"
+                               "    def nested_def_py():\n"
+                               "        return 1\n"
+                               "    return nested_def_py()\n",
+                               CTX_LANG_PYTHON, "t", "b.py");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    ASSERT(has_def_qn(r, "Function", "t.b.outer_py.nested_def_py"));
+    ctx_free_result(r);
+    PASS();
+}
+
+TEST(nested_go_closure) {
+    CtxFileResult *r = extract("package main\n\n"
+                               "func OuterGo() int {\n"
+                               "\tnestedClosureGo := func() int { return 1 }\n"
+                               "\treturn nestedClosureGo()\n"
+                               "}\n",
+                               CTX_LANG_GO, "t", "c.go");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    ASSERT(has_def_qn(r, "Function", "t.c.OuterGo.nestedClosureGo"));
+    ctx_free_result(r);
+    PASS();
+}
+
+TEST(nested_go_multi_assign_closures_named_distinctly) {
+    CtxFileResult *r = extract("package main\n\n"
+                               "func Outer() {\n"
+                               "\ta, b := func() int { return 1 }, func() int { return 2 }\n"
+                               "\t_ = a\n\t_ = b\n"
+                               "}\n",
+                               CTX_LANG_GO, "t", "m.go");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    ASSERT(has_def_qn(r, "Function", "t.m.Outer.a"));
+    ASSERT(has_def_qn(r, "Function", "t.m.Outer.b"));
+    ctx_free_result(r);
+    PASS();
+}
+
+TEST(nested_rust_fn) {
+    CtxFileResult *r = extract("pub fn outer_rs() -> i32 {\n"
+                               "    fn nested_fn_rs() -> i32 { 1 }\n"
+                               "    nested_fn_rs()\n"
+                               "}\n",
+                               CTX_LANG_RUST, "t", "d.rs");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    ASSERT(has_def_qn(r, "Function", "t.d.outer_rs.nested_fn_rs"));
+    ctx_free_result(r);
+    PASS();
+}
+
+TEST(nested_ruby_def) {
+    CtxFileResult *r = extract("def outer_rb\n"
+                               "  def nested_def_rb\n"
+                               "    1\n"
+                               "  end\n"
+                               "  nested_def_rb\n"
+                               "end\n",
+                               CTX_LANG_RUBY, "t", "e.rb");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    ASSERT(has_def_qn(r, "Function", "t.e.outer_rb.nested_def_rb"));
+    ctx_free_result(r);
+    PASS();
+}
+
+TEST(nested_php_function) {
+    CtxFileResult *r = extract("<?php\n"
+                               "function outer_php() {\n"
+                               "    function nested_fn_php() { return 1; }\n"
+                               "    return nested_fn_php();\n"
+                               "}\n",
+                               CTX_LANG_PHP, "t", "g.php");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    ASSERT(has_def_qn(r, "Function", "t.g.outer_php.nested_fn_php"));
+    ctx_free_result(r);
+    PASS();
+}
+
+TEST(nested_tsx_handler) {
+    CtxFileResult *r = extract("export function CompTsx() {\n"
+                               "  const handleClickTsx = () => {};\n"
+                               "  return null;\n"
+                               "}\n",
+                               CTX_LANG_TSX, "t", "h.tsx");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    ASSERT(has_def_qn(r, "Function", "t.h.CompTsx.handleClickTsx"));
+    ctx_free_result(r);
+    PASS();
+}
+
+TEST(nested_java_local_class) {
+    CtxFileResult *r = extract("public class KlassJava {\n"
+                               "  public int methodJava() {\n"
+                               "    class LocalKlassJava { int v() { return 1; } }\n"
+                               "    return new LocalKlassJava().v();\n"
+                               "  }\n"
+                               "}\n",
+                               CTX_LANG_JAVA, "t", "f.java");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    ASSERT(has_def_any(r, "LocalKlassJava"));
+    ctx_free_result(r);
+    PASS();
+}
+
 /* ═══════════════════════════════════════════════════════════════════
  * Suite
  * ═══════════════════════════════════════════════════════════════════ */
@@ -2614,6 +3048,30 @@ SUITE(extraction) {
     RUN_TEST(python_docstring);
     RUN_TEST(go_function_extraction);
     RUN_TEST(js_arrow_function);
+    RUN_TEST(nested_toplevel_qn_unchanged);
+    RUN_TEST(nested_method_qn_unchanged);
+    RUN_TEST(nested_ts_arrow_and_fn_decl);
+    RUN_TEST(nested_same_name_in_two_functions);
+    RUN_TEST(nested_same_name_class_in_two_functions);
+    RUN_TEST(nested_call_attributes_to_nested_fn);
+    RUN_TEST(nested_def_inside_toplevel_anonymous_callback);
+    RUN_TEST(nested_call_in_anonymous_cb_keeps_outer_scope);
+    RUN_TEST(nested_call_in_class_nested_in_function_chains_fully);
+    RUN_TEST(nested_call_in_class_nested_in_class_chains_fully);
+    RUN_TEST(nested_class_in_method_of_nested_class_chains_fully);
+    RUN_TEST(nested_def_in_toplevel_anonymous_cb_is_scope_local);
+    RUN_TEST(nested_anonymous_callback_makes_no_node);
+    RUN_TEST(nested_in_method_body);
+    RUN_TEST(nested_cpp_template_not_duplicated);
+    RUN_TEST(nested_deep_nesting_no_stack_overflow);
+    RUN_TEST(nested_python_def);
+    RUN_TEST(nested_go_closure);
+    RUN_TEST(nested_go_multi_assign_closures_named_distinctly);
+    RUN_TEST(nested_rust_fn);
+    RUN_TEST(nested_ruby_def);
+    RUN_TEST(nested_php_function);
+    RUN_TEST(nested_tsx_handler);
+    RUN_TEST(nested_java_local_class);
 
     /* language_failures_test.go ports */
     RUN_TEST(commonlisp_defun);

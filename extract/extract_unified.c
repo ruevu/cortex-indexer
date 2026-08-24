@@ -91,6 +91,27 @@ static TSNode resolve_func_name_node(TSNode node) {
     return name_node;
 }
 
+// Find the QN of the innermost enclosing function-or-class scope, by actual
+// source nesting depth (not by kind). state->scopes[] holds only ancestors of
+// the node currently being visited (pop_expired_scopes discards anything at
+// or past the current depth before each push), and entries are appended in
+// strictly increasing depth order as the walk descends — so scanning
+// backward from the top of the stack for the first SCOPE_FUNC or SCOPE_CLASS
+// entry finds the true nearest enclosing scope regardless of whether it's a
+// function or a class. This replaces recompute_state's independent
+// "last function wins" / "last class wins" slots, which lose the relative
+// nesting order between the two kinds whenever they interleave (e.g. a class
+// nested inside a function, or vice versa) and so always let function scope
+// win even when a class is the nearer ancestor.
+static const char *innermost_owner_qn(const WalkState *state) {
+    for (int i = state->scope_top - SKIP_ONE; i >= 0; i--) {
+        if (state->scopes[i].kind == SCOPE_FUNC || state->scopes[i].kind == SCOPE_CLASS) {
+            return state->scopes[i].qn;
+        }
+    }
+    return NULL;
+}
+
 // Compute function QN for scope tracking (mirrors ctx_enclosing_func_qn logic).
 static const char *compute_func_qn(CtxExtractCtx *ctx, TSNode node, const CtxLangSpec *spec,
                                    WalkState *state) {
@@ -109,14 +130,19 @@ static const char *compute_func_qn(CtxExtractCtx *ctx, TSNode node, const CtxLan
         return NULL;
     }
 
-    if (state->enclosing_class_qn) {
-        return ctx_arena_sprintf(ctx->arena, "%s.%s", state->enclosing_class_qn, name);
+    const char *owner_qn = innermost_owner_qn(state);
+    if (owner_qn) {
+        return ctx_fqn_scoped(ctx->arena, owner_qn, name);
     }
     return ctx_fqn_compute(ctx->arena, ctx->project, ctx->rel_path, name);
 }
 
-// Compute class QN for scope tracking.
-static const char *compute_class_qn(CtxExtractCtx *ctx, TSNode node) {
+// Compute class QN for scope tracking. Chains onto the innermost enclosing
+// function-or-class scope (see innermost_owner_qn) so a class nested inside
+// a function, or nested inside another class, gets a QN that matches
+// walk_defs's extract_class_def / compute_class_qn in extract_defs.c instead
+// of always falling flat to the module QN.
+static const char *compute_class_qn(CtxExtractCtx *ctx, TSNode node, WalkState *state) {
     TSNode name_node = ts_node_child_by_field_name(node, TS_FIELD("name"));
     if (ts_node_is_null(name_node)) {
         return NULL;
@@ -127,6 +153,10 @@ static const char *compute_class_qn(CtxExtractCtx *ctx, TSNode node) {
         return NULL;
     }
 
+    const char *owner_qn = innermost_owner_qn(state);
+    if (owner_qn) {
+        return ctx_fqn_scoped(ctx->arena, owner_qn, name);
+    }
     return ctx_fqn_compute(ctx->arena, ctx->project, ctx->rel_path, name);
 }
 
@@ -664,7 +694,7 @@ static void push_boundary_scopes(CtxExtractCtx *ctx, TSNode node, const CtxLangS
             push_scope(state, SCOPE_FUNC, depth, fqn);
         }
     } else if (spec->class_node_types && ctx_kind_in_set(node, spec->class_node_types)) {
-        const char *cqn = compute_class_qn(ctx, node);
+        const char *cqn = compute_class_qn(ctx, node, state);
         if (cqn) {
             push_scope(state, SCOPE_CLASS, depth, cqn);
         }

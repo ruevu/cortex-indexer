@@ -76,7 +76,7 @@ static const char *empty_types[] = {NULL};
 
 // ==================== GO ====================
 static const char *go_func_types[] = {"function_declaration", "method_declaration", "method_elem",
-                                      NULL};
+                                      "func_literal", NULL};
 static const char *go_class_types[] = {"type_spec", "type_alias", NULL};
 static const char *go_field_types[] = {"field_declaration", NULL};
 static const char *go_module_types[] = {"source_file", NULL};

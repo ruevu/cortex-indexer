@@ -8,6 +8,7 @@
 #include "semantic/ast_profile.h"
 #include "tree_sitter/api.h" // TSNode, ts_node_*
 #include <stdint.h>          // uint32_t
+#include <stdlib.h>          // malloc, free
 #include <string.h>
 #include <ctype.h>
 
@@ -171,9 +172,11 @@ enum {
 enum { RT_PAIR_SIZE = 2 };
 
 // Forward declarations
-static void extract_func_def(CtxExtractCtx *ctx, TSNode node, const CtxLangSpec *spec);
+static const char *extract_func_def(CtxExtractCtx *ctx, TSNode node, const CtxLangSpec *spec);
 static void extract_class_def(CtxExtractCtx *ctx, TSNode node, const CtxLangSpec *spec);
 static void walk_defs(CtxExtractCtx *ctx, TSNode root, const CtxLangSpec *spec, int depth_unused);
+static void walk_nested_defs(CtxExtractCtx *ctx, TSNode owner_node, const CtxLangSpec *spec,
+                             const char *owner_qn);
 static void extract_variables(CtxExtractCtx *ctx, TSNode root, const CtxLangSpec *spec);
 static void extract_class_variables(CtxExtractCtx *ctx, TSNode class_node, const CtxLangSpec *spec);
 static void extract_rust_impl(CtxExtractCtx *ctx, TSNode node, const CtxLangSpec *spec);
@@ -184,6 +187,19 @@ static void extract_class_fields(CtxExtractCtx *ctx, TSNode class_node, const ch
 static void extract_elixir_call(CtxExtractCtx *ctx, TSNode node, const CtxLangSpec *spec);
 
 // --- Helpers ---
+
+// Push a definition, tagging it scope-local when the walk is currently inside a
+// callable body. Single choke point on purpose: every definition constructor in
+// this file goes through it, so the flag can never be forgotten on a newly added
+// one. ctx->in_callable_body is maintained by walk_nested_defs and is > 0 even
+// when ctx->enclosing_func_qn is NULL (top-level anonymous callable — see
+// walk_nested_defs), which is exactly the case a parent_function check misses.
+static void push_def(CtxExtractCtx *ctx, CtxDefinition def) {
+    if (ctx->in_callable_body > 0) {
+        def.scope_local = true;
+    }
+    ctx_defs_push(&ctx->result->defs, ctx->arena, def);
+}
 
 // Get "name" field from a node
 static TSNode func_name_node(TSNode node) {
@@ -537,6 +553,63 @@ static TSNode resolve_toplevel_arrow_name(TSNode node, const char *kind) {
     return null_node;
 }
 
+// Go: resolve func_literal name from parent short_var_declaration/assignment.
+// `x := func() {...}` parses as short_var_declaration{left: expression_list,
+// right: expression_list{func_literal}} — the literal's direct parent is the
+// right-hand expression_list, so we unwrap one level before checking for the
+// declaration/assignment shape.
+//
+// Multi-value declarations (`a, b := func(){...}, func(){...}`) put more than
+// one closure in that right-hand expression_list, each paired positionally
+// with the matching left-hand identifier — the closure at RHS index i names
+// itself from the LHS identifier at the same index i, not always index 0.
+// We only trust that pairing when the left/right counts line up 1:1; if they
+// don't (or the node's own position can't be found), we return a null node
+// rather than guess — an unnamed closure degrades safely (no def emitted),
+// but a wrongly-named one pollutes the graph with a bad QN.
+static TSNode resolve_go_closure_name(TSNode node) {
+    TSNode null_node = {0};
+    TSNode parent = ts_node_parent(node);
+    if (ts_node_is_null(parent)) {
+        return null_node;
+    }
+    const char *pk = ts_node_type(parent);
+    if (strcmp(pk, "expression_list") != 0) {
+        return null_node;
+    }
+    TSNode rhs_list = parent;
+    int rhs_index = -1;
+    uint32_t rc = ts_node_named_child_count(rhs_list);
+    for (uint32_t i = 0; i < rc; i++) {
+        if (ts_node_eq(ts_node_named_child(rhs_list, i), node)) {
+            rhs_index = (int)i;
+            break;
+        }
+    }
+    if (rhs_index < 0) {
+        return null_node;
+    }
+
+    parent = ts_node_parent(rhs_list);
+    if (ts_node_is_null(parent)) {
+        return null_node;
+    }
+    pk = ts_node_type(parent);
+    if (strcmp(pk, "short_var_declaration") != 0 && strcmp(pk, "assignment_statement") != 0) {
+        return null_node;
+    }
+
+    TSNode left = ts_node_child_by_field_name(parent, TS_FIELD("left"));
+    if (ts_node_is_null(left)) {
+        return null_node;
+    }
+    uint32_t lc = ts_node_named_child_count(left);
+    if (lc != rc || (uint32_t)rhs_index >= lc) {
+        return null_node;
+    }
+    return ts_node_named_child(left, (uint32_t)rhs_index);
+}
+
 // Try C/C++/CUDA/GLSL function_definition declarator name or template unwrap.
 static TSNode resolve_func_name_c_family(TSNode *node_ptr, CtxLanguage lang, const char *kind) {
     if ((lang == CTX_LANG_CPP || lang == CTX_LANG_CUDA) &&
@@ -588,6 +661,12 @@ static TSNode resolve_func_name(TSNode node, CtxLanguage lang) {
 
         {
             TSNode r = resolve_toplevel_arrow_name(node, kind);
+            if (!ts_node_is_null(r)) {
+                return r;
+            }
+        }
+        if (lang == CTX_LANG_GO && strcmp(kind, "func_literal") == 0) {
+            TSNode r = resolve_go_closure_name(node);
             if (!ts_node_is_null(r)) {
                 return r;
             }
@@ -1545,17 +1624,17 @@ static void resolve_cpp_trailing_return(CtxArena *a, TSNode func_node, const cha
     }
 }
 
-static void extract_func_def(CtxExtractCtx *ctx, TSNode node, const CtxLangSpec *spec) {
+static const char *extract_func_def(CtxExtractCtx *ctx, TSNode node, const CtxLangSpec *spec) {
     CtxArena *a = ctx->arena;
 
     TSNode name_node = resolve_func_name(node, ctx->language);
     if (ts_node_is_null(name_node)) {
-        return;
+        return NULL;
     }
 
     char *name = ctx_node_text(a, name_node, ctx->source);
     if (!name || !name[0] || strcmp(name, "function") == 0) {
-        return;
+        return NULL;
     }
 
     TSNode func_node = unwrap_template_inner(node, ctx->language);
@@ -1564,7 +1643,10 @@ static void extract_func_def(CtxExtractCtx *ctx, TSNode node, const CtxLangSpec 
     memset(&def, 0, sizeof(def));
 
     def.name = name;
-    def.qualified_name = ctx_fqn_compute(a, ctx->project, ctx->rel_path, name);
+    def.qualified_name = ctx->enclosing_func_qn
+                             ? ctx_fqn_scoped(a, ctx->enclosing_func_qn, name)
+                             : ctx_fqn_compute(a, ctx->project, ctx->rel_path, name);
+    def.parent_function = ctx->enclosing_func_qn;
     def.label = "Function";
     def.file_path = ctx->rel_path;
     def.start_line = ts_node_start_point(node).row + TS_LINE_OFFSET;
@@ -1637,7 +1719,8 @@ static void extract_func_def(CtxExtractCtx *ctx, TSNode node, const CtxLangSpec 
         def.is_entry_point = true;
     }
 
-    ctx_defs_push(&ctx->result->defs, a, def);
+    push_def(ctx, def);
+    return def.qualified_name;
 }
 
 // --- Class definition extraction ---
@@ -1654,7 +1737,7 @@ static void push_simple_class_def(CtxExtractCtx *ctx, TSNode node, char *name, c
     def.start_line = ts_node_start_point(node).row + TS_LINE_OFFSET;
     def.end_line = ts_node_end_point(node).row + TS_LINE_OFFSET;
     def.is_exported = true;
-    ctx_defs_push(&ctx->result->defs, a, def);
+    push_def(ctx, def);
 }
 
 // Find TOML table key name from children.
@@ -1828,10 +1911,22 @@ static void extract_class_def(CtxExtractCtx *ctx, TSNode node, const CtxLangSpec
         return;
     }
 
-    // For nested classes, prefix with enclosing class QN (e.g., Outer.Inner)
+    // For nested classes, prefix with enclosing class QN (e.g., Outer.Inner).
+    // A class declared inside a function/method body (no enclosing class)
+    // chains onto the enclosing function scope instead, so same-named local
+    // classes in different functions don't collide on a flat module QN.
+    // parent_function is set on exactly the branch that scoped the QN to a
+    // function: it is the ENCLOSES edge's source and the registry-exclusion key,
+    // so a function-local class must carry it the same way a nested function
+    // does — otherwise it gets a scoped QN but stays project-wide resolvable and
+    // structurally orphaned.
     const char *class_qn;
+    const char *parent_func = NULL;
     if (ctx->enclosing_class_qn) {
         class_qn = ctx_arena_sprintf(a, "%s.%s", ctx->enclosing_class_qn, name);
+    } else if (ctx->enclosing_func_qn) {
+        class_qn = ctx_fqn_scoped(a, ctx->enclosing_func_qn, name);
+        parent_func = ctx->enclosing_func_qn;
     } else {
         class_qn = ctx_fqn_compute(a, ctx->project, ctx->rel_path, name);
     }
@@ -1856,6 +1951,7 @@ static void extract_class_def(CtxExtractCtx *ctx, TSNode node, const CtxLangSpec
     def.qualified_name = class_qn;
     def.label = label;
     def.file_path = ctx->rel_path;
+    def.parent_function = parent_func;
     def.start_line = ts_node_start_point(node).row + TS_LINE_OFFSET;
     def.end_line = ts_node_end_point(node).row + TS_LINE_OFFSET;
     def.is_exported = ctx_is_exported(name, ctx->language);
@@ -1863,7 +1959,7 @@ static void extract_class_def(CtxExtractCtx *ctx, TSNode node, const CtxLangSpec
     def.decorators = extract_decorators(a, node, ctx->source, ctx->language, spec);
     def.docstring = extract_docstring(a, node, ctx->source, ctx->language);
 
-    ctx_defs_push(&ctx->result->defs, a, def);
+    push_def(ctx, def);
 
     // Extract methods inside the class
     extract_class_methods(ctx, node, class_qn, spec);
@@ -2003,13 +2099,13 @@ static TSNode resolve_method_name(TSNode child, CtxLanguage lang) {
 }
 
 // Push a single method definition
-static void push_method_def(CtxExtractCtx *ctx, TSNode child, const char *class_qn,
-                            const CtxLangSpec *spec, TSNode name_node) {
+static const char *push_method_def(CtxExtractCtx *ctx, TSNode child, const char *class_qn,
+                                   const CtxLangSpec *spec, TSNode name_node) {
     CtxArena *a = ctx->arena;
 
     char *name = ctx_node_text(a, name_node, ctx->source);
     if (!name || !name[0]) {
-        return;
+        return NULL;
     }
 
     const char *method_qn = ctx_arena_sprintf(a, "%s.%s", class_qn, name);
@@ -2061,7 +2157,8 @@ static void push_method_def(CtxExtractCtx *ctx, TSNode child, const char *class_
     // MinHash fingerprint
     compute_fingerprint(ctx, &def, child);
 
-    ctx_defs_push(&ctx->result->defs, a, def);
+    push_def(ctx, def);
+    return method_qn;
 }
 
 // Extract methods from an ObjC implementation_definition node.
@@ -2112,7 +2209,8 @@ static void extract_class_methods(CtxExtractCtx *ctx, TSNode class_node, const c
             continue;
         }
 
-        push_method_def(ctx, child, class_qn, spec, name_node);
+        const char *method_qn = push_method_def(ctx, child, class_qn, spec, name_node);
+        walk_nested_defs(ctx, child, spec, method_qn);
     }
 }
 
@@ -2197,7 +2295,8 @@ static void extract_rust_impl(CtxExtractCtx *ctx, TSNode node, const CtxLangSpec
         // MinHash fingerprint
         compute_fingerprint(ctx, &def, child);
 
-        ctx_defs_push(&ctx->result->defs, a, def);
+        push_def(ctx, def);
+        walk_nested_defs(ctx, child, spec, method_qn);
     }
 }
 
@@ -2245,7 +2344,7 @@ static void extract_elixir_func_def(CtxExtractCtx *ctx, TSNode node, const char 
     def.start_line = ts_node_start_point(node).row + TS_LINE_OFFSET;
     def.end_line = ts_node_end_point(node).row + TS_LINE_OFFSET;
     def.is_exported = (strcmp(macro, "def") == 0 || strcmp(macro, "defmacro") == 0);
-    ctx_defs_push(&ctx->result->defs, a, def);
+    push_def(ctx, def);
 }
 
 // Emit Class definition for an Elixir defmodule node. Returns do_block or null.
@@ -2273,7 +2372,7 @@ static TSNode emit_elixir_module_class(CtxExtractCtx *ctx, TSNode cur) {
     def.start_line = ts_node_start_point(cur).row + TS_LINE_OFFSET;
     def.end_line = ts_node_end_point(cur).row + TS_LINE_OFFSET;
     def.is_exported = true;
-    ctx_defs_push(&ctx->result->defs, a, def);
+    push_def(ctx, def);
     return ctx_find_child_by_kind(cur, "do_block");
 }
 
@@ -2337,7 +2436,7 @@ static void push_var_def(CtxExtractCtx *ctx, const char *name, TSNode node) {
     def.start_line = ts_node_start_point(node).row + TS_LINE_OFFSET;
     def.end_line = ts_node_end_point(node).row + TS_LINE_OFFSET;
     def.is_exported = ctx_is_exported(name, ctx->language);
-    ctx_defs_push(&ctx->result->defs, a, def);
+    push_def(ctx, def);
 }
 
 // Helper: extract name from a declarator chain (C/C++/ObjC)
@@ -3136,7 +3235,7 @@ static void extract_class_fields(CtxExtractCtx *ctx, TSNode class_node, const ch
         def.end_line = ts_node_end_point(child).row + TS_LINE_OFFSET;
         def.is_exported = ctx_is_exported(name, ctx->language);
 
-        ctx_defs_push(&ctx->result->defs, a, def);
+        push_def(ctx, def);
     }
 }
 
@@ -3167,6 +3266,7 @@ static void extract_class_variables(CtxExtractCtx *ctx, TSNode class_node,
 typedef struct {
     TSNode node;
     const char *enclosing_class_qn; // saved context for class nesting
+    const char *enclosing_func_qn;  // saved context for function nesting
 } walk_defs_frame_t;
 
 #define CTX_WALK_DEFS_STACK_CAP 4096
@@ -3186,7 +3286,7 @@ static void push_nested_class_nodes(TSNode body, const CtxLangSpec *spec, walk_d
             TSNode child = ts_node_child(cur, (uint32_t)i);
             if (ctx_kind_in_set(child, spec->class_node_types)) {
                 if (*top < CTX_WALK_DEFS_STACK_CAP) {
-                    stack[(*top)++] = (walk_defs_frame_t){child, enclosing_qn};
+                    stack[(*top)++] = (walk_defs_frame_t){child, enclosing_qn, NULL};
                 }
             } else {
                 const char *ck = ts_node_type(child);
@@ -3233,10 +3333,16 @@ static const char *compute_class_qn(CtxExtractCtx *ctx, TSNode node, const char 
             if (saved_enclosing) {
                 return ctx_arena_sprintf(ctx->arena, "%s.%s", saved_enclosing, cname);
             }
+            // No enclosing class: a class local to a function/method body
+            // chains onto that function's scope instead of falling straight
+            // to a flat module QN (mirrors extract_class_def's fallback).
+            if (ctx->enclosing_func_qn) {
+                return ctx_fqn_scoped(ctx->arena, ctx->enclosing_func_qn, cname);
+            }
             return ctx_fqn_compute(ctx->arena, ctx->project, ctx->rel_path, cname);
         }
     }
-    return saved_enclosing;
+    return saved_enclosing ? saved_enclosing : ctx->enclosing_func_qn;
 }
 
 // Push nested class children from a class body container onto the walk stack.
@@ -3255,20 +3361,86 @@ static void push_class_body_children(TSNode node, const CtxLangSpec *spec, walk_
     }
     // No body found — push all children directly
     for (int ci = (int)nc - SKIP_CHAR; ci >= 0 && *top < CTX_WALK_DEFS_STACK_CAP; ci--) {
-        stack[(*top)++] = (walk_defs_frame_t){ts_node_child(node, (uint32_t)ci), new_enclosing};
+        stack[(*top)++] =
+            (walk_defs_frame_t){ts_node_child(node, (uint32_t)ci), new_enclosing, NULL};
     }
+}
+
+// Walk a callable's body for nested definitions, scoped to owner_qn.
+// Saves and restores ctx scope so callers are unaffected. Recurses into
+// walk_defs once per source nesting level; walk_defs heap-allocates its
+// frame stack rather than putting it on the C stack, so this recursion's
+// C-stack cost per level is a few words, not CTX_WALK_DEFS_STACK_CAP frames
+// — nesting depth here is unbounded by design (no depth cap).
+//
+// owner_qn may legitimately be NULL: a top-level *anonymous* callable (an
+// IIFE, or a callback literal passed directly to a call — e.g. a
+// `describe("...", () => { ... })` block) has no name, so extract_func_def
+// returns NULL and the caller's own enclosing scope is already NULL (module
+// scope). NULL is not "no owner", it IS the owner — module scope — so we
+// must still descend: definitions found here get flat module-level QNs via
+// ctx_fqn_compute (see extract_func_def's `ctx->enclosing_func_qn ? ... :
+// ctx_fqn_compute(...)` branch), which is exactly what compute_func_qn in
+// extract_unified.c computes for calls inside the same body (its
+// innermost_owner_qn finds no pushed scope for the anonymous callable
+// either, since push_boundary_scopes only pushes a scope when compute_func_qn
+// returns non-NULL). The two walkers agree by construction. Bailing out here
+// used to silently skip every definition nested inside a top-level anonymous
+// callable — the dominant real-world shape being test files (`describe`/`it`
+// blocks), whose bodies were never walked at all.
+//
+// Descending clears enclosing_class_qn for the duration: a function/method body
+// resets class nesting, the exact mirror of the existing rule that a class body
+// resets function nesting (push_class_body_children / push_nested_class_nodes
+// pass NULL for the frame's function slot). Without the reset, a class declared
+// in a method of a *nested* class saw the stale OUTER class QN — and
+// extract_class_def tests enclosing_class_qn before enclosing_func_qn, so that
+// stale outer scope beat the nearer method scope. The unified walker in
+// extract_unified.c picks the innermost owner by depth, so the two walkers
+// disagreed on the QN and the body's calls fell back to the file node.
+//
+// in_callable_body tracks the descent depth so definitions found here can be
+// tagged scope_local (see push_def). It is a separate signal from owner_qn
+// precisely because owner_qn is legitimately NULL above: those defs get flat
+// module QNs, but they are still not project-wide resolvable.
+static void walk_nested_defs(CtxExtractCtx *ctx, TSNode owner_node, const CtxLangSpec *spec,
+                             const char *owner_qn) {
+    const char *saved_func = ctx->enclosing_func_qn;
+    const char *saved_class = ctx->enclosing_class_qn;
+    ctx->enclosing_func_qn = owner_qn;
+    ctx->enclosing_class_qn = NULL;
+    ctx->in_callable_body++;
+    uint32_t nc = ts_node_child_count(owner_node);
+    for (uint32_t i = 0; i < nc; i++) {
+        walk_defs(ctx, ts_node_child(owner_node, i), spec, 0);
+    }
+    ctx->in_callable_body--;
+    ctx->enclosing_func_qn = saved_func;
+    ctx->enclosing_class_qn = saved_class;
 }
 
 static void walk_defs(CtxExtractCtx *ctx, TSNode root, const CtxLangSpec *spec, int depth_unused) {
     (void)depth_unused;
-    walk_defs_frame_t stack[CTX_WALK_DEFS_STACK_CAP];
+    // Heap-allocated, not a C-stack array: walk_nested_defs recurses into
+    // walk_defs once per source function/method nesting level, and nesting
+    // depth is intentionally unbounded (no depth cap). A stack-local
+    // CTX_WALK_DEFS_STACK_CAP-entry array here would cost ~192 KiB of
+    // C-stack per recursion level, exhausting an 8 MB thread stack after a
+    // few dozen levels; heap allocation makes the per-level C-stack cost a
+    // single pointer instead.
+    walk_defs_frame_t *stack =
+        (walk_defs_frame_t *)malloc(CTX_WALK_DEFS_STACK_CAP * sizeof(walk_defs_frame_t));
+    if (!stack) {
+        return;
+    }
     int top = 0;
-    stack[top++] = (walk_defs_frame_t){root, ctx->enclosing_class_qn};
+    stack[top++] = (walk_defs_frame_t){root, ctx->enclosing_class_qn, ctx->enclosing_func_qn};
 
     while (top > 0) {
         walk_defs_frame_t frame = stack[--top];
         TSNode node = frame.node;
         ctx->enclosing_class_qn = frame.enclosing_class_qn;
+        ctx->enclosing_func_qn = frame.enclosing_func_qn;
         const char *kind = ts_node_type(node);
 
         if (ctx->language == CTX_LANG_ELIXIR && strcmp(kind, "call") == 0) {
@@ -3278,8 +3450,21 @@ static void walk_defs(CtxExtractCtx *ctx, TSNode root, const CtxLangSpec *spec, 
 
         if (ctx_kind_in_set(node, spec->function_node_types)) {
             if (!is_template_class_node(node, ctx->language)) {
-                extract_func_def(ctx, node, spec);
+                const char *fn_qn = extract_func_def(ctx, node, spec);
                 if (ctx->language != CTX_LANG_WOLFRAM) {
+                    // Descend so definitions inside the body are indexed.
+                    // An unnamed function yields no QN — its children inherit
+                    // this frame's scope, matching how the unified walker in
+                    // extract_unified.c treats unnameable functions.
+                    // Descend from the unwrapped inner function, not `node`
+                    // itself: for C++/CUDA, `node` may be a template_declaration
+                    // wrapper whose child function_definition also matches
+                    // spec->function_node_types — walking the wrapper's own
+                    // children would re-visit and re-extract that same
+                    // function_definition as a nested duplicate. unwrap_template_inner
+                    // is a no-op for every other case (returns node unchanged).
+                    walk_nested_defs(ctx, unwrap_template_inner(node, ctx->language), spec,
+                                     fn_qn ? fn_qn : frame.enclosing_func_qn);
                     continue;
                 }
             }
@@ -3310,10 +3495,12 @@ static void walk_defs(CtxExtractCtx *ctx, TSNode root, const CtxLangSpec *spec, 
 
         uint32_t count = ts_node_child_count(node);
         for (int i = (int)count - SKIP_CHAR; i >= 0 && top < CTX_WALK_DEFS_STACK_CAP; i--) {
-            stack[top++] =
-                (walk_defs_frame_t){ts_node_child(node, (uint32_t)i), frame.enclosing_class_qn};
+            stack[top++] = (walk_defs_frame_t){ts_node_child(node, (uint32_t)i),
+                                               frame.enclosing_class_qn,
+                                               frame.enclosing_func_qn};
         }
     }
+    free(stack);
 }
 
 void ctx_extract_definitions(CtxExtractCtx *ctx) {

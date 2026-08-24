@@ -41,6 +41,9 @@ Thumbs.db
 memory/
 reference/
 
+# Superpowers working artifacts (brainstorms, specs, plans) — private, local-only
+.superpowers/
+
 # Build artifacts
 build/
 node_modules/
@@ -53,3 +56,6 @@ CHANGELOG.md
 
 # Soak test output
 soak-results/
+
+# Local Cortex index state (derived, per-checkout)
+.cortex/

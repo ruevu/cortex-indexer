@@ -50,6 +50,9 @@ bool ctx_is_module_level(TSNode node, CtxLanguage lang);
 // Compute qualified name: project.rel_path_parts.name
 char *ctx_fqn_compute(CtxArena *a, const char *project, const char *rel_path, const char *name);
 
+// Scoped QN: parent_qn.name. Falls back to NULL if either input is NULL.
+char *ctx_fqn_scoped(CtxArena *a, const char *parent_qn, const char *name);
+
 // Module QN (file without name): project.rel_path_parts
 char *ctx_fqn_module(CtxArena *a, const char *project, const char *rel_path);
 

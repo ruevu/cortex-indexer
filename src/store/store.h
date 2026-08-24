@@ -269,6 +269,14 @@ int ctx_store_dump_to_file(ctx_store_t *s, const char *dest_path);
 
 int ctx_store_upsert_project(ctx_store_t *s, const char *name, const char *root_path);
 int ctx_store_get_project(ctx_store_t *s, const char *name, ctx_project_t *out);
+
+/* Extraction-shape generation. Bump when a change alters the node shape the
+ * extractor produces, so existing DBs are rebuilt instead of incrementally
+ * patched into a mixed state. 1 = nested definitions (spec 2026-08-10). */
+#define CTX_EXTRACT_SCHEMA 1
+
+/* Stored extraction generation for a project, or 0 if absent/unset. */
+int ctx_store_get_extract_schema(ctx_store_t *s, const char *project);
 int ctx_store_list_projects(ctx_store_t *s, ctx_project_t **out, int *count);
 int ctx_store_delete_project(ctx_store_t *s, const char *name);
 
