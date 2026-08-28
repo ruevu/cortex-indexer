@@ -2,7 +2,8 @@
  * test_fqn.c -- Tests for FQN (Fully Qualified Name) computation.
  *
  * Covers: ctx_pipeline_fqn_compute, ctx_pipeline_fqn_module,
- *         ctx_pipeline_fqn_folder, ctx_project_name_from_path.
+ *         ctx_pipeline_fqn_file, ctx_pipeline_fqn_folder,
+ *         ctx_project_name_from_path.
  */
 #include "test_framework.h"
 #include "../src/pipeline/pipeline.h"
@@ -338,6 +339,95 @@ TEST(fqn_module_deep) {
     PASS();
 }
 
+
+/* ================================================================
+ * ctx_pipeline_fqn_file
+ *
+ * A File node stands for a PATH, so its qn keeps the extension. Every other
+ * qn here drops it. That difference is the whole point: sibling files sharing
+ * a stem used to reduce to one qn, and because the graph buffer is keyed by
+ * qn, only one of them got a node at all.
+ * ================================================================ */
+
+TEST(fqn_file_keeps_extension) {
+    ASSERT_FQN(ctx_pipeline_fqn_file("proj", "pkg/handler.go"), "proj.pkg.handler.go.__file__");
+    PASS();
+}
+
+/* The regression this function exists for. Co-locating a stylesheet next to
+ * its component is a mainstream convention (and mandatory in some codebases),
+ * so this pair is common rather than exotic. */
+TEST(fqn_file_component_and_stylesheet_do_not_collide) {
+    char *tsx = ctx_pipeline_fqn_file("proj", "ui/Button.tsx");
+    char *css = ctx_pipeline_fqn_file("proj", "ui/Button.css");
+    ASSERT_NOT_NULL(tsx);
+    ASSERT_NOT_NULL(css);
+    ASSERT(strcmp(tsx, css) != 0);
+    free(tsx);
+    free(css);
+    PASS();
+}
+
+/* Same shape, other ecosystems: a Python stub beside its module. */
+TEST(fqn_file_python_stub_does_not_collide) {
+    char *py = ctx_pipeline_fqn_file("proj", "pkg/client.py");
+    char *pyi = ctx_pipeline_fqn_file("proj", "pkg/client.pyi");
+    ASSERT_NOT_NULL(py);
+    ASSERT_NOT_NULL(pyi);
+    ASSERT(strcmp(py, pyi) != 0);
+    free(py);
+    free(pyi);
+    PASS();
+}
+
+/* index.ts is only collapsed to its directory when naming a SYMBOL. A file qn
+ * must keep it, or index.ts and index.css merge right back together. */
+TEST(fqn_file_index_is_not_collapsed) {
+    char *ts = ctx_pipeline_fqn_file("proj", "pkg/index.ts");
+    char *css = ctx_pipeline_fqn_file("proj", "pkg/index.css");
+    ASSERT_NOT_NULL(ts);
+    ASSERT_NOT_NULL(css);
+    ASSERT_STR_EQ(ts, "proj.pkg.index.ts.__file__");
+    ASSERT(strcmp(ts, css) != 0);
+    free(ts);
+    free(css);
+    PASS();
+}
+
+TEST(fqn_file_extensionless_path) {
+    ASSERT_FQN(ctx_pipeline_fqn_file("proj", "bin/run"), "proj.bin.run.__file__");
+    PASS();
+}
+
+TEST(fqn_file_null_path) {
+    ASSERT_FQN(ctx_pipeline_fqn_file("proj", NULL), "proj.__file__");
+    PASS();
+}
+
+TEST(fqn_file_null_project) {
+    ASSERT_FQN(ctx_pipeline_fqn_file(NULL, "a/b.ts"), "");
+    PASS();
+}
+
+TEST(fqn_file_backslash_normalized) {
+    ASSERT_FQN(ctx_pipeline_fqn_file("proj", "a\\b\\c.ts"), "proj.a.b.c.ts.__file__");
+    PASS();
+}
+
+/* The other half of the contract: module qns must KEEP stripping, because an
+ * import specifier ("./Button") carries no extension and resolves against
+ * them. A fix that made these unique too would silently drop IMPORTS edges. */
+TEST(fqn_module_still_strips_extension) {
+    ASSERT_FQN(ctx_pipeline_fqn_module("proj", "ui/Button.tsx"), "proj.ui.Button");
+    PASS();
+}
+
+TEST(fqn_compute_symbol_still_strips_extension) {
+    ASSERT_FQN(ctx_pipeline_fqn_compute("proj", "ui/Button.tsx", "render"),
+               "proj.ui.Button.render");
+    PASS();
+}
+
 /* ================================================================
  * ctx_pipeline_fqn_folder
  * ================================================================ */
@@ -560,6 +650,18 @@ SUITE(fqn) {
     RUN_TEST(fqn_module_null_path);
     RUN_TEST(fqn_module_null_project);
     RUN_TEST(fqn_module_deep);
+
+    /* fqn_file */
+    RUN_TEST(fqn_file_keeps_extension);
+    RUN_TEST(fqn_file_component_and_stylesheet_do_not_collide);
+    RUN_TEST(fqn_file_python_stub_does_not_collide);
+    RUN_TEST(fqn_file_index_is_not_collapsed);
+    RUN_TEST(fqn_file_extensionless_path);
+    RUN_TEST(fqn_file_null_path);
+    RUN_TEST(fqn_file_null_project);
+    RUN_TEST(fqn_file_backslash_normalized);
+    RUN_TEST(fqn_module_still_strips_extension);
+    RUN_TEST(fqn_compute_symbol_still_strips_extension);
 
     /* fqn_folder */
     RUN_TEST(fqn_folder_basic);

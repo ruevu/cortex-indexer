@@ -543,6 +543,34 @@ void ctx_gbuf_set_next_id(ctx_gbuf_t *gb, int64_t next_id) {
 
 /* ── Node operations ─────────────────────────────────────────────── */
 
+/* True when a claim from `incoming_file` must NOT take over a qualified name
+ * already held by `holder`.
+ *
+ * Distinct files can still land on one qualified name: a module qn drops the
+ * file extension, so Component.tsx and Component.css reduce to the same string.
+ * The buffer is keyed by qualified name, so exactly one of them gets a node.
+ *
+ * Last-write-wins used to pick the survivor, and under parallel extraction
+ * "last" means whichever worker happened to finish first — files are dispatched
+ * to workers dynamically, so the same tree indexed twice produced two different
+ * graphs. Downstream that is not cosmetic: nodes carry the losing file's path,
+ * so every consumer that rolls edges up to files (frame clustering, impact
+ * analysis) reshuffles between runs over an unchanged repo.
+ *
+ * A total order on file_path fixes the survivor without needing to know the
+ * arrival order: whichever path sorts first wins, from any interleaving. Which
+ * file that is remains arbitrary — the qn is genuinely ambiguous — but it is
+ * now a property of the repository instead of the thread schedule.
+ *
+ * Equal paths are not a collision at all: that is one file's node being
+ * enriched by a later pass, and must still update in place. */
+static bool qn_claim_loses(const ctx_gbuf_node_t *holder, const char *incoming_file) {
+    if (!holder->file_path || !incoming_file) {
+        return false;
+    }
+    return strcmp(holder->file_path, incoming_file) < 0;
+}
+
 static int64_t upsert_node_impl(ctx_gbuf_t *gb, const char *label, const char *name,
                                 const char *qualified_name, const char *file_path, int start_line,
                                 int end_line, const char *properties_json, bool scope_local) {
@@ -557,6 +585,10 @@ static int64_t upsert_node_impl(ctx_gbuf_t *gb, const char *label, const char *n
          * never takes over a qualified name that is already claimed. Return the
          * owner's ID so the caller's edges still land on a real node. */
         if (scope_local) {
+            return existing->id;
+        }
+        /* Deterministic collision survivor — see qn_claim_loses. */
+        if (qn_claim_loses(existing, file_path)) {
             return existing->id;
         }
         /* Update in-place. Strdup new values BEFORE freeing old ones,
@@ -1085,7 +1117,12 @@ static void merge_overwrite_fields(ctx_gbuf_node_t *existing, const ctx_gbuf_nod
  * recorded, so the skipped node's edges retarget the surviving node. */
 static void merge_update_existing(ctx_gbuf_node_t *existing, const ctx_gbuf_node_t *sn,
                                   CtxHashTable **remap) {
-    if (!sn->scope_local) {
+    /* Same survivor rule as upsert_node_impl — the merge is the other path a
+     * qualified name gets claimed twice, and the two must agree or the result
+     * depends on whether the collision happened inside one worker or across
+     * two. The remap below still runs either way: edges from the losing node
+     * must land on the survivor regardless of which side won. */
+    if (!sn->scope_local && !qn_claim_loses(existing, sn->file_path)) {
         merge_overwrite_fields(existing, sn);
     }
 

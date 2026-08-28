@@ -138,8 +138,11 @@ TEST(fqn_index_symbols_get_clean_qn) {
 }
 
 TEST(fqn_init_file_node_distinct) {
-    /* File node QN (name="__file__") for __init__.py must be distinct from Folder */
-    char *file_qn = ctx_pipeline_fqn_compute("proj", "pkg/__init__.py", "__file__");
+    /* File node QN for __init__.py must be distinct from the Folder's. Spelled
+     * with ctx_pipeline_fqn_file because that is what pass_structure uses — the
+     * old fqn_compute(..., "__file__") form strips the extension and would let
+     * __init__.py collide with a sibling __init__ of another extension. */
+    char *file_qn = ctx_pipeline_fqn_file("proj", "pkg/__init__.py");
     char *folder_qn = ctx_pipeline_fqn_folder("proj", "pkg");
     ASSERT_NOT_NULL(file_qn);
     ASSERT_NOT_NULL(folder_qn);

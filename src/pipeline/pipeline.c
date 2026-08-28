@@ -310,7 +310,7 @@ static int pass_structure(ctx_pipeline_t *p, const ctx_file_info_t *files, int f
         }
 
         /* Create File node */
-        char *file_qn = ctx_pipeline_fqn_compute(p->project_name, rel, "__file__");
+        char *file_qn = ctx_pipeline_fqn_file(p->project_name, rel);
         /* Extract basename */
         const char *slash = strrchr(rel, '/');
         const char *basename = slash ? slash + SKIP_ONE : rel;
