@@ -121,8 +121,7 @@ static void handle_kustomize(ctx_pipeline_ctx_t *ctx, const char *path, const ch
             }
 
             /* Compute target file QN */
-            char *target_qn =
-                ctx_pipeline_fqn_compute(ctx->project_name, imp->module_path, "__file__");
+            char *target_qn = ctx_pipeline_fqn_file(ctx->project_name, imp->module_path);
             if (!target_qn) {
                 continue;
             }
@@ -161,7 +160,7 @@ static void handle_k8s_manifest(ctx_pipeline_ctx_t *ctx, const char *path, const
     }
 
     /* Compute file node QN for DEFINES edges */
-    char *file_qn = ctx_pipeline_fqn_compute(ctx->project_name, rel_path, "__file__");
+    char *file_qn = ctx_pipeline_fqn_file(ctx->project_name, rel_path);
     const ctx_gbuf_node_t *file_node = file_qn ? ctx_gbuf_find_by_qn(ctx->gbuf, file_qn) : NULL;
     free(file_qn);
 

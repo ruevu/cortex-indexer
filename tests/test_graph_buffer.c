@@ -630,6 +630,77 @@ TEST(gbuf_find_edges_by_target_type_multiple) {
     PASS();
 }
 
+
+/* ── QN collision determinism ─────────────────────────────────────
+ *
+ * Distinct files can land on one qualified name — a module qn drops the file
+ * extension, so Component.tsx and Component.css reduce to the same string.
+ * The buffer is keyed by qn, so one of them wins. Last-write-wins made the
+ * winner depend on arrival order, and under parallel extraction that is the
+ * thread schedule: the same tree indexed twice produced different graphs.
+ * The survivor is now the lexicographically smaller file_path, from any
+ * interleaving. */
+
+TEST(gbuf_qn_collision_survivor_is_order_independent) {
+    const char *files[2] = {"ui/Button.css", "ui/Button.tsx"};
+
+    for (int first = 0; first < 2; first++) {
+        ctx_gbuf_t *gb = ctx_gbuf_new("test", "/tmp");
+        ctx_gbuf_upsert_node(gb, "Module", "a", "test.ui.Button", files[first], 1, 5, "{}");
+        ctx_gbuf_upsert_node(gb, "Module", "b", "test.ui.Button", files[1 - first], 1, 5, "{}");
+
+        /* One node either way — the collision is real, not a duplicate. */
+        ASSERT_EQ(ctx_gbuf_node_count(gb), 1);
+
+        const ctx_gbuf_node_t *n = ctx_gbuf_find_by_qn(gb, "test.ui.Button");
+        ASSERT_NOT_NULL(n);
+        ASSERT_STR_EQ(n->file_path, "ui/Button.css");
+        ctx_gbuf_free(gb);
+    }
+    PASS();
+}
+
+/* The merge path is the other way a qn gets claimed twice — a collision across
+ * two workers rather than inside one. Both paths must pick the same winner or
+ * the result depends on how the file set happened to be sharded. */
+TEST(gbuf_merge_qn_collision_matches_upsert) {
+    const char *files[2] = {"ui/Button.css", "ui/Button.tsx"};
+
+    for (int first = 0; first < 2; first++) {
+        ctx_gbuf_t *dst = ctx_gbuf_new("test", "/tmp");
+        ctx_gbuf_t *src = ctx_gbuf_new("test", "/tmp");
+        ctx_gbuf_upsert_node(dst, "Module", "a", "test.ui.Button", files[first], 1, 5, "{}");
+        ctx_gbuf_upsert_node(src, "Module", "b", "test.ui.Button", files[1 - first], 1, 5, "{}");
+
+        ASSERT_EQ(ctx_gbuf_merge(dst, src), 0);
+        ASSERT_EQ(ctx_gbuf_node_count(dst), 1);
+
+        const ctx_gbuf_node_t *n = ctx_gbuf_find_by_qn(dst, "test.ui.Button");
+        ASSERT_NOT_NULL(n);
+        ASSERT_STR_EQ(n->file_path, "ui/Button.css");
+        ctx_gbuf_free(dst);
+        ctx_gbuf_free(src);
+    }
+    PASS();
+}
+
+/* A re-write of the SAME file is enrichment, not a collision: a later pass
+ * refining a node it already owns must still take effect. */
+TEST(gbuf_same_file_rewrite_still_updates) {
+    ctx_gbuf_t *gb = ctx_gbuf_new("test", "/tmp");
+    ctx_gbuf_upsert_node(gb, "Module", "stub", "pkg.thing", "pkg/thing.go", 1, 1, "{}");
+    ctx_gbuf_upsert_node(gb, "Class", "Thing", "pkg.thing", "pkg/thing.go", 1, 40,
+                         "{\"enriched\":true}");
+
+    const ctx_gbuf_node_t *n = ctx_gbuf_find_by_qn(gb, "pkg.thing");
+    ASSERT_NOT_NULL(n);
+    ASSERT_STR_EQ(n->label, "Class");
+    ASSERT_STR_EQ(n->name, "Thing");
+    ASSERT_EQ(n->end_line, 40);
+    ctx_gbuf_free(gb);
+    PASS();
+}
+
 /* ── Merge tests ──────────────────────────────────────────────── */
 
 TEST(gbuf_merge_overlapping_qns) {
@@ -970,6 +1041,11 @@ SUITE(graph_buffer) {
     RUN_TEST(gbuf_edge_count_by_type_missing);
     RUN_TEST(gbuf_delete_edges_preserves_other_types);
     RUN_TEST(gbuf_find_edges_by_target_type_multiple);
+
+    /* QN collision determinism */
+    RUN_TEST(gbuf_qn_collision_survivor_is_order_independent);
+    RUN_TEST(gbuf_merge_qn_collision_matches_upsert);
+    RUN_TEST(gbuf_same_file_rewrite_still_updates);
 
     /* Merge tests */
     RUN_TEST(gbuf_merge_overlapping_qns);

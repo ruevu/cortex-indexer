@@ -269,7 +269,7 @@ static void process_def(ctx_pipeline_ctx_t *ctx, const CtxDefinition *def, const
          strcmp(def->label, "Class") == 0 || strcmp(def->label, "Interface") == 0)) {
         ctx_registry_add(ctx->registry, def->name, def->qualified_name, def->label);
     }
-    char *file_qn = ctx_pipeline_fqn_compute(ctx->project_name, rel, "__file__");
+    char *file_qn = ctx_pipeline_fqn_file(ctx->project_name, rel);
     const ctx_gbuf_node_t *file_node = ctx_gbuf_find_by_qn(ctx->gbuf, file_qn);
     if (file_node && node_id > 0) {
         ctx_gbuf_insert_edge(ctx->gbuf, file_node->id, node_id, "DEFINES", "{}");
@@ -299,7 +299,7 @@ static const ctx_gbuf_node_t *find_channel_source(ctx_pipeline_ctx_t *ctx, const
         node = ctx_gbuf_find_by_qn(ctx->gbuf, ch->enclosing_func_qn);
     }
     if (!node) {
-        char *file_qn = ctx_pipeline_fqn_compute(ctx->project_name, rel, "__file__");
+        char *file_qn = ctx_pipeline_fqn_file(ctx->project_name, rel);
         node = ctx_gbuf_find_by_qn(ctx->gbuf, file_qn);
         free(file_qn);
     }
@@ -352,7 +352,7 @@ static int create_import_edges_for_file(ctx_pipeline_ctx_t *ctx, const CtxFileRe
             target_qn = ctx_pipeline_fqn_module(ctx->project_name, imp->module_path);
         }
         const ctx_gbuf_node_t *target = ctx_gbuf_find_by_qn(ctx->gbuf, target_qn);
-        char *file_qn = ctx_pipeline_fqn_compute(ctx->project_name, rel, "__file__");
+        char *file_qn = ctx_pipeline_fqn_file(ctx->project_name, rel);
         const ctx_gbuf_node_t *source_node = ctx_gbuf_find_by_qn(ctx->gbuf, file_qn);
         if (source_node && target) {
             char imp_props[CTX_SZ_256];

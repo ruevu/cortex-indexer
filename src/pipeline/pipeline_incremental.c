@@ -464,7 +464,7 @@ int ctx_pipeline_run_incremental(ctx_pipeline_t *p, const char *db_path, ctx_fil
     };
 
     for (int i = 0; i < ci; i++) {
-        char *file_qn = ctx_pipeline_fqn_compute(project, changed_files[i].rel_path, "__file__");
+        char *file_qn = ctx_pipeline_fqn_file(project, changed_files[i].rel_path);
         if (file_qn) {
             ctx_gbuf_upsert_node(existing, "File", changed_files[i].rel_path, file_qn,
                                  changed_files[i].rel_path, 0, 0, "{}");

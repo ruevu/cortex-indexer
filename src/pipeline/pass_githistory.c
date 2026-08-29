@@ -469,8 +469,8 @@ int ctx_pipeline_githistory_apply(ctx_pipeline_ctx_t *ctx, const ctx_githistory_
     for (int i = 0; i < result->count; i++) {
         const ctx_change_coupling_t *cc = &result->couplings[i];
 
-        char *qn_a = ctx_pipeline_fqn_compute(ctx->project_name, cc->file_a, "__file__");
-        char *qn_b = ctx_pipeline_fqn_compute(ctx->project_name, cc->file_b, "__file__");
+        char *qn_a = ctx_pipeline_fqn_file(ctx->project_name, cc->file_a);
+        char *qn_b = ctx_pipeline_fqn_file(ctx->project_name, cc->file_b);
 
         const ctx_gbuf_node_t *node_a = ctx_gbuf_find_by_qn(ctx->gbuf, qn_a);
         const ctx_gbuf_node_t *node_b = ctx_gbuf_find_by_qn(ctx->gbuf, qn_b);

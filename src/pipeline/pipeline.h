@@ -88,8 +88,24 @@ void ctx_pipeline_unlock(void);
  * Caller must free() the returned string. */
 char *ctx_pipeline_fqn_compute(const char *project, const char *rel_path, const char *name);
 
-/* Module QN: project.dir.parts (no name). Caller must free(). */
+/* Module QN: project.dir.parts (no name). Caller must free().
+ * Extension-stripped ON PURPOSE — this is the key that extension-less import
+ * specifiers ("./Component") resolve against. */
 char *ctx_pipeline_fqn_module(const char *project, const char *rel_path);
+
+/* Terminal segment marking a qualified name as a file's identity rather than a
+ * symbol's. Every producer and consumer of a File node qn must agree on it. */
+#define CTX_FQN_FILE_MARKER "__file__"
+
+/* File QN: project.dir.parts.<basename-with-extension>.__file__.
+ * Caller must free().
+ *
+ * KEEPS the extension, unlike every other qn here, because a File node stands
+ * for a path: Component.tsx and Component.css are two files and need two names.
+ * Always use this for a File node's qn — never spell it as
+ * ctx_pipeline_fqn_compute(project, rel, CTX_FQN_FILE_MARKER), which strips the
+ * extension and silently merges the pair. */
+char *ctx_pipeline_fqn_file(const char *project, const char *rel_path);
 
 /* Folder QN: project.dir.parts. Caller must free(). */
 char *ctx_pipeline_fqn_folder(const char *project, const char *rel_dir);

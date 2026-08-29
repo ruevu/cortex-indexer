@@ -250,7 +250,7 @@ static int build_import_map(const ctx_gbuf_t *gbuf, const char *project_name, co
     *out_vals = NULL;
     *out_count = 0;
 
-    char *file_qn = ctx_pipeline_fqn_compute(project_name, rel_path, "__file__");
+    char *file_qn = ctx_pipeline_fqn_file(project_name, rel_path);
     const ctx_gbuf_node_t *file_node = ctx_gbuf_find_by_qn(gbuf, file_qn);
     free(file_qn);
     if (!file_node) {
@@ -711,7 +711,7 @@ static int register_and_link_def(ctx_pipeline_ctx_t *ctx, const CtxDefinition *d
         ctx_registry_add(ctx->registry, def->name, def->qualified_name, def->label);
         (*reg_entries)++;
     }
-    char *file_qn = ctx_pipeline_fqn_compute(ctx->project_name, rel, "__file__");
+    char *file_qn = ctx_pipeline_fqn_file(ctx->project_name, rel);
     const ctx_gbuf_node_t *file_node = ctx_gbuf_find_by_qn(ctx->gbuf, file_qn);
     const ctx_gbuf_node_t *def_node = ctx_gbuf_find_by_qn(ctx->gbuf, def->qualified_name);
     if (file_node && def_node) {
@@ -752,7 +752,7 @@ static int create_imports_edges(ctx_pipeline_ctx_t *ctx, const CtxFileResult *re
             target_qn = ctx_pipeline_fqn_module(ctx->project_name, imp->module_path);
         }
         const ctx_gbuf_node_t *target = ctx_gbuf_find_by_qn(ctx->gbuf, target_qn);
-        char *file_qn = ctx_pipeline_fqn_compute(ctx->project_name, rel, "__file__");
+        char *file_qn = ctx_pipeline_fqn_file(ctx->project_name, rel);
         const ctx_gbuf_node_t *source_node = ctx_gbuf_find_by_qn(ctx->gbuf, file_qn);
         if (source_node && target) {
             char esc_ln[CTX_SZ_128];
@@ -776,7 +776,7 @@ static const ctx_gbuf_node_t *find_channel_src(ctx_pipeline_ctx_t *ctx, const Ct
         node = ctx_gbuf_find_by_qn(ctx->gbuf, ch->enclosing_func_qn);
     }
     if (!node) {
-        char *file_qn = ctx_pipeline_fqn_compute(ctx->project_name, rel, "__file__");
+        char *file_qn = ctx_pipeline_fqn_file(ctx->project_name, rel);
         node = ctx_gbuf_find_by_qn(ctx->gbuf, file_qn);
         free(file_qn);
     }
@@ -1275,7 +1275,7 @@ static const ctx_gbuf_node_t *find_source_node(const ctx_gbuf_t *gbuf, const cha
         src = ctx_gbuf_find_by_qn(gbuf, enclosing_qn);
     }
     if (!src) {
-        char *file_qn = ctx_pipeline_fqn_compute(project, rel, "__file__");
+        char *file_qn = ctx_pipeline_fqn_file(project, rel);
         src = ctx_gbuf_find_by_qn(gbuf, file_qn);
         free(file_qn);
     }

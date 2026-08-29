@@ -97,20 +97,41 @@ static void strip_init_or_index(const char **segments, int *seg_count, const cha
 
 /* ── Public API ──────────────────────────────────────────────────── */
 
-char *ctx_pipeline_fqn_compute(const char *project, const char *rel_path, const char *name) {
+/* Shared body for the FQN variants. `keep_extension` separates two jobs that
+ * used to share one spelling:
+ *
+ *   - A SYMBOL or MODULE qn drops the extension, because it names the thing a
+ *     language refers to. A module qn in particular is the join key that import
+ *     specifiers resolve against, and those carry no extension ("./Component"),
+ *     so stripping is load-bearing there — do not change it.
+ *
+ *   - A FILE qn identifies a path, and must therefore keep the extension.
+ *     Stripping it collapsed every pair of siblings sharing a stem onto one
+ *     name — Component.tsx with Component.css, module.py with module.pyi — and
+ *     since the graph buffer is keyed by qualified name, the loser got no node
+ *     at all. Co-locating a stylesheet beside its component is a mainstream
+ *     convention, so this is not a corner case: on a mid-size TypeScript repo
+ *     it silently dropped 43 of 755 files from the graph. */
+static char *fqn_build(const char *project, const char *rel_path, const char *name,
+                       bool keep_extension) {
     if (!project) {
         return strdup("");
     }
 
     char *path = strdup(rel_path ? rel_path : "");
     ctx_normalize_path_sep(path);
-    strip_file_extension(path);
+    if (!keep_extension) {
+        strip_file_extension(path);
+    }
 
     const char *segments[CTX_SZ_256];
     int seg_count = 0;
     segments[seg_count++] = project;
     seg_count += tokenize_path(path, segments + seg_count, FQN_MAX_PATH_SEGS);
 
+    /* Only meaningful once the extension is gone: with it, the last segment
+     * reads "index.ts", never "index". File qns want that — index.ts and
+     * index.css are two files and must stay two names. */
     strip_init_or_index(segments, &seg_count, name);
 
     if (name && name[0] != '\0') {
@@ -122,8 +143,16 @@ char *ctx_pipeline_fqn_compute(const char *project, const char *rel_path, const 
     return result;
 }
 
+char *ctx_pipeline_fqn_compute(const char *project, const char *rel_path, const char *name) {
+    return fqn_build(project, rel_path, name, false);
+}
+
 char *ctx_pipeline_fqn_module(const char *project, const char *rel_path) {
-    return ctx_pipeline_fqn_compute(project, rel_path, NULL);
+    return fqn_build(project, rel_path, NULL, false);
+}
+
+char *ctx_pipeline_fqn_file(const char *project, const char *rel_path) {
+    return fqn_build(project, rel_path, CTX_FQN_FILE_MARKER, true);
 }
 
 enum {
