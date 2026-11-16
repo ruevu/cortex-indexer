@@ -356,6 +356,18 @@ void ctx_pipeline_create_route_nodes(ctx_gbuf_t *gb);
  *     stays bindable even when its path did not resolve. More than one
  *     segment after any root (`fmt.wrap(x).format`, `ns.inner.f`) is refused,
  *     because the last segment's receiver is then a property or a call result.
+ *
+ * A guess reaching a method (todo T-byzx item 5) is refused, in the same
+ * languages and for the same strategies, when the receiver (the text before
+ * the last dot) is a global namespace (`Promise`, `Object`, `console`, …) or
+ * the method name is an ECMAScript builtin (`get`, `push`, `replace`, `then`,
+ * …): `counts.get()` on a Map used to land on the one repo class with a `get`.
+ * It is kept when the receiver is `this`/`super`, or names the method's class:
+ * the class is one of the receiver's identifiers (`new TodoRepository().get`),
+ * or the receiver's trailing identifier shares a camel-case word with it,
+ * whole or as an abbreviation of four letters or more (`historyStack.push`,
+ * `this.todos.get`, `repo.delete` for `TodoRepository`).
+ *
  * Everything else returns true, so other languages are unchanged.
  *
  * Only the plain CALLS edge is withheld: route, HTTP, async and config

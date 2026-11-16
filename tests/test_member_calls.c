@@ -7,6 +7,9 @@
  * it. The same fixture runs through the sequential and the parallel resolver,
  * because each carries its own emit path.
  *
+ * The second half (T-byzx item 5) covers methods: `counts.get()` on a Map used
+ * to land on the one repo class with a `get` method.
+ *
  * Suite: suite_member_calls
  */
 #include "../src/foundation/compat.h"
@@ -125,6 +128,99 @@ static int setup_member_call_repo(void) {
                              "    obj.helper()\n") != 0) {
         return -1;
     }
+
+    /* Repo methods that share their names with built-in methods (T-byzx item 5),
+     * plus one that does not (`write`). */
+    if (write_file("history.ts", "export class TodoRepository {\n"
+                                 "  get(id: string): string {\n"
+                                 "    return id;\n"
+                                 "  }\n"
+                                 "  delete(id: string): void {}\n"
+                                 "}\n"
+                                 "export class HistoryStack {\n"
+                                 "  push(entry: string): void {}\n"
+                                 "}\n"
+                                 "export class ContextResolver {\n"
+                                 "  resolve(path: string): string {\n"
+                                 "    return path;\n"
+                                 "  }\n"
+                                 "}\n"
+                                 "export class ExportLog {\n"
+                                 "  error(message: string): void {}\n"
+                                 "  write(message: string): void {}\n"
+                                 "}\n"
+                                 "export class JSONCache {\n"
+                                 "  set(key: string): void {}\n"
+                                 "}\n") != 0) {
+        return -1;
+    }
+    if (write_file("use_history.ts",
+                   "import { TodoRepository, HistoryStack, ContextResolver } from './history';\n"
+                   "\n"
+                   "export function readsAMap(counts: Map<string, number>): void {\n"
+                   "  counts.get('a');\n"
+                   "}\n"
+                   "\n"
+                   "export function pushesToAnArray(items: string[]): void {\n"
+                   "  items.push('a');\n"
+                   "}\n"
+                   "\n"
+                   "export function waitsOnAPromise(): Promise<void> {\n"
+                   "  return Promise.resolve();\n"
+                   "}\n"
+                   "\n"
+                   "export function logsToTheConsole(): void {\n"
+                   "  console.error('x');\n"
+                   "}\n"
+                   "\n"
+                   "export function pushesHistory(historyStack: HistoryStack): void {\n"
+                   "  historyStack.push('a');\n"
+                   "}\n"
+                   "\n"
+                   "export function resolvesThroughAnAssertion(resolver: ContextResolver | null): void {\n"
+                   "  resolver!.resolve('a');\n"
+                   "}\n"
+                   "\n"
+                   "export function readsTodosRepo(todosRepo: TodoRepository): void {\n"
+                   "  todosRepo.get('a');\n"
+                   "}\n"
+                   "\n"
+                   "export function readsTodos(todos: TodoRepository): void {\n"
+                   "  todos.get('a');\n"
+                   "}\n"
+                   "\n"
+                   "export function fillsACache(cache: JSONCache): void {\n"
+                   "  cache.set('a');\n"
+                   "}\n"
+                   "\n"
+                   "export function deletesThroughRepo(repo: TodoRepository): void {\n"
+                   "  repo.delete('a');\n"
+                   "}\n"
+                   "\n"
+                   "export function readsANewRepository(): void {\n"
+                   "  new TodoRepository().get('a');\n"
+                   "}\n"
+                   "\n"
+                   "export function writesToASink(sink: unknown): void {\n"
+                   "  sink.write('a');\n"
+                   "}\n"
+                   "\n"
+                   "export class TodoCache extends TodoRepository {\n"
+                   "  warm(): void {\n"
+                   "    this.get('a');\n"
+                   "  }\n"
+                   "}\n") != 0) {
+        return -1;
+    }
+    if (write_file("registry.py", "class Registry:\n"
+                                  "    def keys(self):\n"
+                                  "        pass\n") != 0) {
+        return -1;
+    }
+    if (write_file("use_keys.py", "def list_keys(table):\n"
+                                  "    table.keys()\n") != 0) {
+        return -1;
+    }
     return 0;
 }
 
@@ -220,6 +316,87 @@ TEST(member_call_rule_is_js_ts_only) {
     PASS();
 }
 
+/* ── Builtin method names (T-byzx item 5) ───────────────────────────
+ * A builtin-named call on a receiver that names no repo class reaches a
+ * builtin (`counts.get`, `items.push`), not the one repo method of that name. */
+
+TEST(builtin_named_call_on_unrelated_receiver_skips_method) {
+    BOTH_MODES(has_def(g_seq, "readsAMap"), has_def(g_par, "readsAMap"));
+    BOTH_MODES(!has_call(g_seq, "readsAMap", "TodoRepository.get"),
+               !has_call(g_par, "readsAMap", "TodoRepository.get"));
+    BOTH_MODES(has_def(g_seq, "pushesToAnArray"), has_def(g_par, "pushesToAnArray"));
+    BOTH_MODES(!has_call(g_seq, "pushesToAnArray", "HistoryStack.push"),
+               !has_call(g_par, "pushesToAnArray", "HistoryStack.push"));
+    PASS();
+}
+
+TEST(global_namespace_receiver_skips_method) {
+    BOTH_MODES(has_def(g_seq, "waitsOnAPromise"), has_def(g_par, "waitsOnAPromise"));
+    BOTH_MODES(!has_call(g_seq, "waitsOnAPromise", "ContextResolver.resolve"),
+               !has_call(g_par, "waitsOnAPromise", "ContextResolver.resolve"));
+    /* `error` is not a builtin method name; the receiver alone rules it out. */
+    BOTH_MODES(has_def(g_seq, "logsToTheConsole"), has_def(g_par, "logsToTheConsole"));
+    BOTH_MODES(!has_call(g_seq, "logsToTheConsole", "ExportLog.error"),
+               !has_call(g_par, "logsToTheConsole", "ExportLog.error"));
+    PASS();
+}
+
+TEST(receiver_naming_the_class_keeps_builtin_named_method) {
+    BOTH_MODES(has_call(g_seq, "pushesHistory", "HistoryStack.push"),
+               has_call(g_par, "pushesHistory", "HistoryStack.push"));
+    BOTH_MODES(has_call(g_seq, "readsTodosRepo", "TodoRepository.get"),
+               has_call(g_par, "readsTodosRepo", "TodoRepository.get"));
+    PASS();
+}
+
+TEST(plural_receiver_names_its_class) {
+    BOTH_MODES(has_call(g_seq, "readsTodos", "TodoRepository.get"),
+               has_call(g_par, "readsTodos", "TodoRepository.get"));
+    PASS();
+}
+
+TEST(receiver_matches_the_word_after_an_acronym) {
+    BOTH_MODES(has_call(g_seq, "fillsACache", "JSONCache.set"),
+               has_call(g_par, "fillsACache", "JSONCache.set"));
+    PASS();
+}
+
+TEST(receiver_word_matches_the_class_after_an_assertion) {
+    BOTH_MODES(has_call(g_seq, "resolvesThroughAnAssertion", "ContextResolver.resolve"),
+               has_call(g_par, "resolvesThroughAnAssertion", "ContextResolver.resolve"));
+    PASS();
+}
+
+TEST(receiver_abbreviating_the_class_keeps_builtin_named_method) {
+    BOTH_MODES(has_call(g_seq, "deletesThroughRepo", "TodoRepository.delete"),
+               has_call(g_par, "deletesThroughRepo", "TodoRepository.delete"));
+    PASS();
+}
+
+TEST(receiver_constructing_the_class_keeps_builtin_named_method) {
+    BOTH_MODES(has_call(g_seq, "readsANewRepository", "TodoRepository.get"),
+               has_call(g_par, "readsANewRepository", "TodoRepository.get"));
+    PASS();
+}
+
+TEST(member_call_on_bare_this_keeps_builtin_named_method) {
+    BOTH_MODES(has_call(g_seq, "warm", "TodoRepository.get"),
+               has_call(g_par, "warm", "TodoRepository.get"));
+    PASS();
+}
+
+TEST(other_method_names_on_unrelated_receivers_still_bind) {
+    BOTH_MODES(has_call(g_seq, "writesToASink", "ExportLog.write"),
+               has_call(g_par, "writesToASink", "ExportLog.write"));
+    PASS();
+}
+
+TEST(builtin_name_rule_is_js_ts_only) {
+    BOTH_MODES(has_call(g_seq, "list_keys", "Registry.keys"),
+               has_call(g_par, "list_keys", "Registry.keys"));
+    PASS();
+}
+
 static void member_calls_teardown(void) {
     if (g_seq) {
         ctx_gbuf_free(g_seq);
@@ -246,5 +423,16 @@ SUITE(member_calls) {
     RUN_TEST(line_break_before_the_dot_keeps_the_receiver_root);
     RUN_TEST(member_call_past_imported_root_skips_free_function);
     RUN_TEST(member_call_rule_is_js_ts_only);
+    RUN_TEST(builtin_named_call_on_unrelated_receiver_skips_method);
+    RUN_TEST(global_namespace_receiver_skips_method);
+    RUN_TEST(receiver_naming_the_class_keeps_builtin_named_method);
+    RUN_TEST(plural_receiver_names_its_class);
+    RUN_TEST(receiver_matches_the_word_after_an_acronym);
+    RUN_TEST(receiver_word_matches_the_class_after_an_assertion);
+    RUN_TEST(receiver_abbreviating_the_class_keeps_builtin_named_method);
+    RUN_TEST(receiver_constructing_the_class_keeps_builtin_named_method);
+    RUN_TEST(member_call_on_bare_this_keeps_builtin_named_method);
+    RUN_TEST(other_method_names_on_unrelated_receivers_still_bind);
+    RUN_TEST(builtin_name_rule_is_js_ts_only);
     member_calls_teardown();
 }
