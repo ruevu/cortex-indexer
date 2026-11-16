@@ -232,13 +232,17 @@ static int64_t create_svc_route_node(ctx_pipeline_ctx_t *ctx, const char *url, c
 
 static void emit_http_async_edge(ctx_pipeline_ctx_t *ctx, const CtxCall *call,
                                  const ctx_gbuf_node_t *source, const ctx_gbuf_node_t *target,
-                                 const ctx_resolution_t *res, ctx_svc_kind_t svc) {
+                                 const ctx_resolution_t *res, ctx_svc_kind_t svc,
+                                 bool bind_plain) {
     const char *url_or_topic = call->first_string_arg;
     bool is_url = (url_or_topic && url_or_topic[0] != '\0' &&
                    (url_or_topic[0] == '/' || strstr(url_or_topic, "://") != NULL));
     bool is_topic = (url_or_topic && url_or_topic[0] != '\0' && svc == CTX_SVC_ASYNC &&
                      strlen(url_or_topic) > PAIR_LEN);
     if (!is_url && !is_topic) {
+        if (!bind_plain) {
+            return; /* T-dt3b: see ctx_registry_admits_member_call */
+        }
         char esc_callee[CTX_SZ_256];
         ctx_json_escape(esc_callee, sizeof(esc_callee), call->callee_name);
         char props[CTX_SZ_512];
@@ -272,18 +276,21 @@ static void emit_http_async_edge(ctx_pipeline_ctx_t *ctx, const CtxCall *call,
     ctx_gbuf_insert_edge(ctx->gbuf, source->id, route_id, edge_type, props);
 }
 
-/* Classify a resolved call and emit the appropriate edge. */
+/* Classify a resolved call and emit the appropriate edge. With bind_plain
+ * false, the plain CALLS edge is withheld but route/HTTP/async/config
+ * classification still runs (T-dt3b, ctx_registry_admits_member_call). */
 static void emit_classified_edge(ctx_pipeline_ctx_t *ctx, const CtxCall *call,
                                  const ctx_gbuf_node_t *source, const ctx_gbuf_node_t *target,
-                                 const ctx_resolution_t *res, const char *module_qn,
-                                 const char **imp_keys, const char **imp_vals, int imp_count) {
+                                 const ctx_resolution_t *res, bool bind_plain,
+                                 const char *module_qn, const char **imp_keys,
+                                 const char **imp_vals, int imp_count) {
     ctx_svc_kind_t svc = ctx_service_pattern_match(res->qualified_name);
     if (svc == CTX_SVC_ROUTE_REG && call->first_string_arg && call->first_string_arg[0] == '/') {
         handle_route_registration(ctx, call, source, module_qn, imp_keys, imp_vals, imp_count);
         return;
     }
     if (svc == CTX_SVC_HTTP || svc == CTX_SVC_ASYNC) {
-        emit_http_async_edge(ctx, call, source, target, res, svc);
+        emit_http_async_edge(ctx, call, source, target, res, svc, bind_plain);
         return;
     }
     if (svc == CTX_SVC_CONFIG) {
@@ -295,6 +302,9 @@ static void emit_classified_edge(ctx_pipeline_ctx_t *ctx, const CtxCall *call,
         snprintf(props, sizeof(props), "{\"callee\":\"%s\",\"key\":\"%s\",\"confidence\":%.2f}",
                  esc_c, esc_k, res->confidence);
         ctx_gbuf_insert_edge(ctx->gbuf, source->id, target->id, "CONFIGURES", props);
+        return;
+    }
+    if (!bind_plain) {
         return;
     }
     char esc_c2[CTX_SZ_256];
@@ -349,8 +359,10 @@ static int try_emit_global_http_call(ctx_pipeline_ctx_t *ctx, const CtxCall *cal
     return SKIP_ONE;
 }
 
-/* Resolve one call and emit the appropriate edge. Returns 1 if resolved, 0 if not. */
+/* Resolve one call and emit the appropriate edge. Returns 1 if resolved, 0 if not.
+ * A member call refused by ctx_registry_admits_member_call counts as unresolved. */
 static int resolve_single_call(ctx_pipeline_ctx_t *ctx, CtxCall *call, const char *rel,
+                               CtxLanguage lang, const CtxImportArray *imports,
                                const char *module_qn, const char **imp_keys, const char **imp_vals,
                                int imp_count) {
     const ctx_gbuf_node_t *source_node = calls_find_source(ctx, rel, call->enclosing_func_qn);
@@ -366,9 +378,11 @@ static int resolve_single_call(ctx_pipeline_ctx_t *ctx, CtxCall *call, const cha
     if (!target_node || source_node->id == target_node->id) {
         return try_emit_global_http_call(ctx, call, source_node);
     }
-    emit_classified_edge(ctx, call, source_node, target_node, &res, module_qn, imp_keys, imp_vals,
-                         imp_count);
-    return SKIP_ONE;
+    bool bind_plain =
+        ctx_registry_admits_member_call(ctx->registry, lang, call->callee_name, &res, imports);
+    emit_classified_edge(ctx, call, source_node, target_node, &res, bind_plain, module_qn, imp_keys,
+                         imp_vals, imp_count);
+    return bind_plain ? SKIP_ONE : 0;
 }
 
 static CtxFileResult *calls_get_or_extract(ctx_pipeline_ctx_t *ctx, int idx,
@@ -435,7 +449,8 @@ int ctx_pipeline_pass_calls(ctx_pipeline_ctx_t *ctx, const ctx_file_info_t *file
                 continue;
             }
             total_calls++;
-            if (resolve_single_call(ctx, call, rel, module_qn, imp_keys, imp_vals, imp_count)) {
+            if (resolve_single_call(ctx, call, rel, files[i].language, &result->imports, module_qn,
+                                    imp_keys, imp_vals, imp_count)) {
                 resolved++;
             } else {
                 unresolved++;

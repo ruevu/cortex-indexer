@@ -17,6 +17,7 @@ enum { REG_INIT_CAP = 16, REG_MIN_CANDIDATES = 3, REG_RESOLVED = 1, REG_SUFFIX_A
 
 #define DEFAULT_CONFIDENCE 0.5
 #include "pipeline/pipeline.h"
+#include "pipeline/pipeline_internal.h"
 #include "foundation/hash_table.h"
 #include "foundation/dyn_array.h"
 #include "foundation/platform.h"
@@ -466,6 +467,68 @@ ctx_resolution_t ctx_registry_resolve(const ctx_registry_t *r, const char *calle
 
     /* Strategy 3+4: name lookup */
     return resolve_name_lookup(r, callee_name, module_qn, import_map_vals, import_map_count);
+}
+
+/* ── Member calls (T-dt3b) ───────────────────────────────────────── */
+
+/* The languages the member-call rule covers: measured on TypeScript monorepos.
+ * Other languages call module functions with member syntax without importing
+ * the module first (Elixir's `MyApp.Utils.f()`), so they need their own rule. */
+static bool lang_has_member_call_rule(CtxLanguage lang) {
+    return lang == CTX_LANG_JAVASCRIPT || lang == CTX_LANG_TYPESCRIPT || lang == CTX_LANG_TSX ||
+           lang == CTX_LANG_VUE || lang == CTX_LANG_SVELTE;
+}
+
+/* Strategies that bind a callee by its last segment alone. */
+static bool binds_by_name_alone(const char *strategy) {
+    return strategy && (strcmp(strategy, "unique_name") == 0 ||
+                        strcmp(strategy, "suffix_match") == 0 || strcmp(strategy, "fuzzy") == 0);
+}
+
+static bool root_is_imported(const char *root, size_t root_len, const CtxImportArray *imports) {
+    if (!imports) {
+        return false;
+    }
+    for (int i = 0; i < imports->count; i++) {
+        const char *name = imports->items[i].local_name;
+        if (name && strlen(name) == root_len && strncmp(name, root, root_len) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool root_is(const char *root, size_t root_len, const char *word) {
+    return strlen(word) == root_len && strncmp(root, word, root_len) == 0;
+}
+
+bool ctx_registry_admits_member_call(const ctx_registry_t *r, CtxLanguage lang,
+                                     const char *callee_name, const ctx_resolution_t *res,
+                                     const CtxImportArray *imports) {
+    if (!lang_has_member_call_rule(lang) || !callee_name || !res || !res->qualified_name) {
+        return true;
+    }
+    const char *dot = strchr(callee_name, '.');
+    if (!dot) {
+        return true; /* a plain call */
+    }
+    if (!binds_by_name_alone(res->strategy)) {
+        return true; /* import_map / same_module: the binding has evidence */
+    }
+    const char *label = ctx_registry_label_of(r, res->qualified_name);
+    if (!label || strcmp(label, "Function") != 0) {
+        return true; /* methods and classes are what member calls reach */
+    }
+    size_t root_len = (size_t)(dot - callee_name);
+    if (root_len > 0 && callee_name[root_len - SKIP_ONE] == '?') {
+        root_len--; /* optional chaining: `a?.b()` */
+    }
+    bool one_segment = strchr(dot + SKIP_ONE, '.') == NULL;
+    if (one_segment &&
+        (root_is(callee_name, root_len, "this") || root_is(callee_name, root_len, "super"))) {
+        return true; /* `this.f()`: kept as before, as upstream keeps it */
+    }
+    return root_is_imported(callee_name, root_len, imports);
 }
 
 /* ── Fuzzy Resolve ──────────────────────────────────────────────── */
