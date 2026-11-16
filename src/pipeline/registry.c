@@ -142,8 +142,14 @@ static const char *import_scope(const char *val, char *buf, size_t size) {
     return buf;
 }
 
-static bool is_import_reachable(const char *candidate_qn, const char **import_vals,
-                                int import_count) {
+/* How a candidate is reachable through the caller's imports: through an
+ * imported module itself, only through the package a barrel import stands
+ * for, or not at all. A guess keeps to the strongest reach it finds, so a
+ * module the caller names outranks the rest of a package it also imports
+ * whole. */
+enum { REACH_NONE = 0, REACH_PACKAGE = 1, REACH_MODULE = 2 };
+
+static int import_reach(const char *candidate_qn, const char **import_vals, int import_count) {
     char cand_mod[CTX_SZ_512];
     const char *last = strrchr(candidate_qn, '.');
     if (last) {
@@ -156,14 +162,24 @@ static bool is_import_reachable(const char *candidate_qn, const char **import_va
     } else {
         snprintf(cand_mod, sizeof(cand_mod), "%s", candidate_qn);
     }
+    int reach = REACH_NONE;
     for (int i = 0; i < import_count; i++) {
+        const char *val = import_vals[i];
+        if (strstr(cand_mod, val) || strstr(val, cand_mod)) {
+            return REACH_MODULE;
+        }
         char scope_buf[CTX_SZ_512];
-        const char *scope = import_scope(import_vals[i], scope_buf, sizeof(scope_buf));
-        if (strstr(cand_mod, scope) || strstr(scope, cand_mod)) {
-            return true;
+        const char *scope = import_scope(val, scope_buf, sizeof(scope_buf));
+        if (scope != val && (strstr(cand_mod, scope) || strstr(scope, cand_mod))) {
+            reach = REACH_PACKAGE;
         }
     }
-    return false;
+    return reach;
+}
+
+static bool is_import_reachable(const char *candidate_qn, const char **import_vals,
+                                int import_count) {
+    return import_reach(candidate_qn, import_vals, import_count) != REACH_NONE;
 }
 
 /* Scale confidence inversely with candidate count. */
@@ -458,15 +474,33 @@ static ctx_resolution_t resolve_same_module(const ctx_registry_t *r, const char 
 }
 
 /* Strategy 4: multiple candidates with import filtering. */
+/* The candidates at the strongest import reach any of them has (none when
+ * nothing is reachable), up to max_out. Returns how many were kept. */
+static int filter_import_reachable(const char **candidates, int count, const char **import_vals,
+                                   int import_count, const char **out, int max_out) {
+    int n = 0;
+    int top = REACH_NONE;
+    for (int i = 0; i < count; i++) {
+        int reach = import_reach(candidates[i], import_vals, import_count);
+        if (reach == REACH_NONE || reach < top) {
+            continue;
+        }
+        if (reach > top) {
+            top = reach;
+            n = 0;
+        }
+        if (n < max_out) {
+            out[n++] = candidates[i];
+        }
+    }
+    return n;
+}
+
 static ctx_resolution_t resolve_multi_with_imports(const qn_array_t *arr, const char *module_qn,
                                                    const char **import_vals, int import_count) {
     const char *filtered[CTX_SZ_256];
-    int fcount = 0;
-    for (int i = 0; i < arr->count && fcount < CTX_SZ_256; i++) {
-        if (is_import_reachable(arr->items[i], import_vals, import_count)) {
-            filtered[fcount++] = arr->items[i];
-        }
-    }
+    int fcount = filter_import_reachable((const char **)arr->items, arr->count, import_vals,
+                                         import_count, filtered, CTX_SZ_256);
     if (fcount == SKIP_ONE) {
         double conf = candidate_count_penalty(CONF_SUFFIX_MATCH, arr->count);
         return (ctx_resolution_t){filtered[0], "suffix_match", conf, arr->count};
@@ -641,16 +675,7 @@ bool ctx_registry_admits_member_call(const ctx_registry_t *r, CtxLanguage lang,
 /* ── Fuzzy Resolve ──────────────────────────────────────────────── */
 
 /* Filter candidates by import reachability. Returns count of reachable. */
-static int filter_import_reachable(const char **candidates, int count, const char **import_vals,
-                                   int import_count, const char **out, int max_out) {
-    int n = 0;
-    for (int i = 0; i < count && n < max_out; i++) {
-        if (is_import_reachable(candidates[i], import_vals, import_count)) {
-            out[n++] = candidates[i];
-        }
-    }
-    return n;
-}
+
 
 ctx_fuzzy_result_t ctx_registry_fuzzy_resolve(const ctx_registry_t *r, const char *callee_name,
                                               const char *module_qn, const char **import_map_keys,

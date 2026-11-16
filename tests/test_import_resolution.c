@@ -178,6 +178,16 @@ static int setup_import_repo(void) {
         /* Two classes with a same-named method; the caller imports one of
          * them, through its package barrel, and sits beside the other. */
         {"board/index.ts", "export * from './actions';\n"},
+        /* A package of two same-method classes; the first listed registers
+         * first and wins an even tie. */
+        {"yard/archive.ts", "export class YardArchive {\n"
+                            "  sweep(): void {}\n"
+                            "}\n"},
+        {"yard/keeper.ts", "export class YardKeeper {\n"
+                           "  sweep(): void {}\n"
+                           "}\n"},
+        {"yard/index.ts", "export * from './keeper';\n"
+                          "export * from './archive';\n"},
         {"board/actions.ts", "export class BoardActions {\n"
                              "  reset(): void {}\n"
                              "}\n"
@@ -190,6 +200,16 @@ static int setup_import_repo(void) {
                                 "export function resetsBoard(): void {\n"
                                 "  boardActions.reset();\n"
                                 "}\n"},
+        /* The caller imports the package barrel and the one module whose
+         * class it instantiates. */
+        {"other/yard_user.ts", "import { YardKeeper } from '../yard/keeper';\n"
+                               "import { yardTools } from '../yard';\n"
+                               "\n"
+                               "export function sweepsLocal(): void {\n"
+                               "  const local = new YardKeeper();\n"
+                               "  local.sweep();\n"
+                               "  void yardTools;\n"
+                               "}\n"},
         /* A package exporting an instance (`toast`, no definition of its own)
          * beside a class that happens to have a member of the called name. */
         {"kit/index.ts", "export * from './sheet';\n"},
@@ -657,6 +677,16 @@ TEST(barrel_import_makes_its_package_reachable_for_a_guess) {
     PASS();
 }
 
+/* A module the caller imports by name outranks the rest of a package it also
+ * imports through the barrel: the guess keeps to the module. */
+TEST(imported_module_outranks_its_package_for_a_guess) {
+    BOTH_MODES(pf_find_call(g_seq, "sweepsLocal", "yard.keeper.YardKeeper.sweep"),
+               pf_find_call(g_par, "sweepsLocal", "yard.keeper.YardKeeper.sweep"));
+    BOTH_MODES(!pf_find_call(g_seq, "sweepsLocal", "yard.archive.YardArchive.sweep"),
+               !pf_find_call(g_par, "sweepsLocal", "yard.archive.YardArchive.sweep"));
+    PASS();
+}
+
 /* A namespace import of a barrel reaches the package's top-level functions. */
 TEST(namespace_import_of_barrel_resolves_member_function) {
     BOTH_MODES(pf_call_resolved_by(g_seq, "hidesAll", "kit.sheet.hideAll", "import_map_suffix"),
@@ -728,6 +758,7 @@ SUITE(import_resolution) {
     RUN_TEST(barrel_file_beside_its_directory_resolves_through_the_folder);
     RUN_TEST(definition_in_the_index_file_is_a_direct_import_hit);
     RUN_TEST(barrel_import_makes_its_package_reachable_for_a_guess);
+    RUN_TEST(imported_module_outranks_its_package_for_a_guess);
     RUN_TEST(namespace_import_of_barrel_resolves_member_function);
     RUN_TEST(barrel_member_call_does_not_claim_another_owners_method);
     RUN_TEST(member_call_on_imported_name_is_not_the_name_itself);
