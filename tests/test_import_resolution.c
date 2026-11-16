@@ -159,6 +159,15 @@ static int setup_import_repo(void) {
          * package's own, the deeper one an internal helper. */
         {"ui/format.ts", "export function format(): void {}\n"},
         {"ui/internal/deep/format.ts", "export function format(): void {}\n"},
+        /* A barrel file beside the directory it re-exports: shop.ts and
+         * shop/ share a qualified name, and the graph keeps the Folder. */
+        {"shop.ts", "export { addItem } from './shop/cart';\n"},
+        {"shop/cart.ts", "export function addItem(): void {}\n"},
+        {"screens/shop_user.ts", "import { addItem } from '../shop.js';\n"
+                                 "\n"
+                                 "export function addsItem(): void {\n"
+                                 "  addItem();\n"
+                                 "}\n"},
         /* A component defined in its directory's index file. */
         {"kit/label/index.ts", "export function Label(): void {}\n"},
         {"screens/label_user.ts", "import { Label } from '../kit/label';\n"
@@ -622,6 +631,14 @@ TEST(barrel_import_with_two_candidates_is_not_high_confidence) {
 /* `toast.show()` on a name the package defines nothing for: the import says
  * where `toast` comes from, not which `show` runs. Another class's member of
  * that name is a guess and must not be labelled as resolved by the import. */
+/* With no module node to name, the Folder that took its qualified name is
+ * still the package the import points into. */
+TEST(barrel_file_beside_its_directory_resolves_through_the_folder) {
+    BOTH_MODES(pf_call_resolved_by(g_seq, "addsItem", "shop.cart.addItem", "import_map_suffix"),
+               pf_call_resolved_by(g_par, "addsItem", "shop.cart.addItem", "import_map_suffix"));
+    PASS();
+}
+
 /* A definition in the index file itself is what a directory import names:
  * definitions there are qualified by the directory, not by `index`. */
 TEST(definition_in_the_index_file_is_a_direct_import_hit) {
@@ -708,6 +725,7 @@ SUITE(import_resolution) {
     RUN_TEST(barrel_import_member_is_the_named_class_member);
     RUN_TEST(barrel_import_with_two_candidates_prefers_the_shallower);
     RUN_TEST(barrel_import_with_two_candidates_is_not_high_confidence);
+    RUN_TEST(barrel_file_beside_its_directory_resolves_through_the_folder);
     RUN_TEST(definition_in_the_index_file_is_a_direct_import_hit);
     RUN_TEST(barrel_import_makes_its_package_reachable_for_a_guess);
     RUN_TEST(namespace_import_of_barrel_resolves_member_function);

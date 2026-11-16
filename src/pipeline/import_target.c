@@ -56,7 +56,7 @@ static const char *it_last_dot(const char *path) {
  * file named without its extension (tag.mapper → tag.mapper.ts); the
  * directory's index module (a barrel: `from '../ui'` is ui/index.ts, whose
  * module qn keeps `index`); the file named with its extension (index.ts, or
- * b.js written for b.ts); and only then the Folder itself. For any other
+ * b.js written for b.ts); and only then a Folder, by either reading. For any other
  * importer the last dot starts an extension, or, in a dotted module path
  * (Python's `util.deco.register`), the imported symbol, so the path's own
  * node is the answer, as it always was. */
@@ -77,7 +77,15 @@ static const ctx_gbuf_node_t *it_module_node(const ctx_pipeline_ctx_t *ctx, cons
     if (!node && it_last_dot(path)) {
         node = it_node_at(ctx, path, false, true);
     }
-    return node ? node : it_node_at(ctx, path, true, false);
+    if (node) {
+        return node;
+    }
+    /* No module: a Folder, by either reading. A file beside the directory of
+     * the same name (store.ts and store/) has the Folder's qualified name, and
+     * the graph keeps only the Folder; its scope holds what the file
+     * re-exports from the directory. */
+    node = it_node_at(ctx, path, true, false);
+    return node || !it_last_dot(path) ? node : it_node_at(ctx, path, false, false);
 }
 
 /* A relative specifier against the importing file, with its last segment
