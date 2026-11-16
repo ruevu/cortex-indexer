@@ -81,6 +81,23 @@ static int setup_member_call_repo(void) {
                              "  fmt.format('a');\n"
                              "}\n"
                              "\n"
+                             /* Formatters break long chains before the dot; the
+                              * callee text keeps that whitespace. */
+                             "export function callsNamespaceAcrossLines(): void {\n"
+                             "  fmt\n"
+                             "    .format('a');\n"
+                             "}\n"
+                             "\n"
+                             /* The receiver of `format` here is a call result or a
+                              * property, not the import itself. */
+                             "export function chainsPastImport(x: string): void {\n"
+                             "  fmt.wrap(x).format();\n"
+                             "}\n"
+                             "\n"
+                             "export function dotsPastImport(): void {\n"
+                             "  fmt.inner.format();\n"
+                             "}\n"
+                             "\n"
                              "export function callsMethod(store: Store): void {\n"
                              "  store.save();\n"
                              "}\n"
@@ -95,6 +112,10 @@ static int setup_member_call_repo(void) {
                              "export class Panel {\n"
                              "  showPanel(): void {\n"
                              "    this.refresh();\n"
+                             "  }\n"
+                             "  showPanelAcrossLines(): void {\n"
+                             "    this\n"
+                             "      .refresh();\n"
                              "  }\n"
                              "}\n") != 0) {
         return -1;
@@ -258,6 +279,24 @@ TEST(member_call_on_bare_this_keeps_binding) {
     PASS();
 }
 
+TEST(line_break_before_the_dot_keeps_the_receiver_root) {
+    BOTH_MODES(has_call(g_seq, "callsNamespaceAcrossLines", "format"),
+               has_call(g_par, "callsNamespaceAcrossLines", "format"));
+    BOTH_MODES(has_call(g_seq, "showPanelAcrossLines", "refresh"),
+               has_call(g_par, "showPanelAcrossLines", "refresh"));
+    PASS();
+}
+
+TEST(member_call_past_imported_root_skips_free_function) {
+    BOTH_MODES(has_def(g_seq, "chainsPastImport"), has_def(g_par, "chainsPastImport"));
+    BOTH_MODES(!has_call(g_seq, "chainsPastImport", "format"),
+               !has_call(g_par, "chainsPastImport", "format"));
+    BOTH_MODES(has_def(g_seq, "dotsPastImport"), has_def(g_par, "dotsPastImport"));
+    BOTH_MODES(!has_call(g_seq, "dotsPastImport", "format"),
+               !has_call(g_par, "dotsPastImport", "format"));
+    PASS();
+}
+
 TEST(member_call_rule_is_js_ts_only) {
     BOTH_MODES(has_call(g_seq, "use_helper", "helper"), has_call(g_par, "use_helper", "helper"));
     PASS();
@@ -286,6 +325,8 @@ SUITE(member_calls) {
     RUN_TEST(member_call_on_imported_name_still_binds);
     RUN_TEST(member_call_still_binds_method);
     RUN_TEST(member_call_on_bare_this_keeps_binding);
+    RUN_TEST(line_break_before_the_dot_keeps_the_receiver_root);
+    RUN_TEST(member_call_past_imported_root_skips_free_function);
     RUN_TEST(member_call_rule_is_js_ts_only);
     member_calls_teardown();
 }

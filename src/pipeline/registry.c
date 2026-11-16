@@ -502,6 +502,16 @@ static bool root_is(const char *root, size_t root_len, const char *word) {
     return strlen(word) == root_len && strncmp(root, word, root_len) == 0;
 }
 
+/* The callee is raw source text, so a chain a formatter broke before the dot
+ * (`fmt\n    .format()`) carries that layout inside the receiver. */
+static size_t trim_trailing_layout(const char *s, size_t len) {
+    while (len > 0 && (s[len - SKIP_ONE] == ' ' || s[len - SKIP_ONE] == '\t' ||
+                       s[len - SKIP_ONE] == '\n' || s[len - SKIP_ONE] == '\r')) {
+        len--;
+    }
+    return len;
+}
+
 bool ctx_registry_admits_member_call(const ctx_registry_t *r, CtxLanguage lang,
                                      const char *callee_name, const ctx_resolution_t *res,
                                      const CtxImportArray *imports) {
@@ -513,19 +523,26 @@ bool ctx_registry_admits_member_call(const ctx_registry_t *r, CtxLanguage lang,
         return true; /* a plain call */
     }
     if (!binds_by_name_alone(res->strategy)) {
-        return true; /* import_map / same_module: the binding has evidence */
+        /* import_map / same_module are out of scope here. same_module's
+         * last-segment fallback is a guess too; upstream guards it separately
+         * (PR #1128, plan step 3 of T-dt3b). */
+        return true;
     }
     const char *label = ctx_registry_label_of(r, res->qualified_name);
     if (!label || strcmp(label, "Function") != 0) {
         return true; /* methods and classes are what member calls reach */
     }
-    size_t root_len = (size_t)(dot - callee_name);
-    if (root_len > 0 && callee_name[root_len - SKIP_ONE] == '?') {
-        root_len--; /* optional chaining: `a?.b()` */
+    if (strchr(dot + SKIP_ONE, '.') != NULL) {
+        /* `fmt.wrap(x).format()`, `ns.inner.f()`, `this.rows.map()`: the
+         * receiver of the last segment is a property or a call result, never
+         * the root itself, whatever the root is. */
+        return false;
     }
-    bool one_segment = strchr(dot + SKIP_ONE, '.') == NULL;
-    if (one_segment &&
-        (root_is(callee_name, root_len, "this") || root_is(callee_name, root_len, "super"))) {
+    size_t root_len = trim_trailing_layout(callee_name, (size_t)(dot - callee_name));
+    if (root_len > 0 && callee_name[root_len - SKIP_ONE] == '?') {
+        root_len = trim_trailing_layout(callee_name, root_len - SKIP_ONE); /* `a?.b()` */
+    }
+    if (root_is(callee_name, root_len, "this") || root_is(callee_name, root_len, "super")) {
         return true; /* `this.f()`: kept as before, as upstream keeps it */
     }
     return root_is_imported(callee_name, root_len, imports);

@@ -319,9 +319,12 @@ void ctx_pipeline_create_route_nodes(ctx_gbuf_t *gb);
  *   - the callee has member syntax (`recv.name`),
  *   - it was resolved by name alone (unique_name, suffix_match or fuzzy),
  *   - the target is registered as a `Function`, and
- *   - the receiver's root is neither a name the file imports (a namespace,
- *     default or named import stays bindable, even when its path did not
- *     resolve) nor a bare `this`/`super` with one segment after it.
+ *   - the callee is not exactly `root.name` (optionally `root?.name`, with
+ *     any line break before the dot) where the root is a name the file
+ *     imports or a bare `this`/`super`. A namespace, default or named import
+ *     stays bindable even when its path did not resolve. More than one
+ *     segment after any root (`fmt.wrap(x).format`, `ns.inner.f`) is refused,
+ *     because the last segment's receiver is then a property or a call result.
  * Everything else returns true, so other languages are unchanged.
  *
  * Only the plain CALLS edge is withheld: route, HTTP, async and config
