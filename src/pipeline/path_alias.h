@@ -29,6 +29,7 @@
 #ifndef CTX_PATH_ALIAS_H
 #define CTX_PATH_ALIAS_H
 
+#include <stdbool.h>
 #include <stddef.h>
 
 typedef struct ctx_path_aliases ctx_path_aliases_t;
@@ -45,6 +46,11 @@ ctx_path_aliases_t *ctx_path_aliases_load(const char *repo_path);
 
 /* NULL-safe. */
 void ctx_path_aliases_free(ctx_path_aliases_t *aliases);
+
+/* Whether rel is a JS-family source file (.ts .tsx .mts .cts .js .jsx .mjs
+ * .cjs .vue .svelte .astro): the files tsconfig governs, and whose imports
+ * follow TypeScript's module resolution. */
+bool ctx_path_aliases_is_script(const char *rel);
 
 /* The repo-relative paths a non-relative specifier may name, seen from the
  * file at source_rel, in the order TypeScript tries them: the best-matching

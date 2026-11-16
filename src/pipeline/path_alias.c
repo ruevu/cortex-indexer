@@ -253,8 +253,11 @@ static yyjson_doc *pa_read_json(const char *repo, const char *rel) {
     size_t got = fread(buf, 1, (size_t)len, f);
     fclose(f);
     buf[got] = '\0';
-    yyjson_doc *doc = yyjson_read(
-        buf, got, YYJSON_READ_ALLOW_COMMENTS | YYJSON_READ_ALLOW_TRAILING_COMMAS);
+    /* tsconfig is JSONC: comments and trailing commas are legal, and a file
+     * saved with a UTF-8 byte order mark still loads in TypeScript. */
+    yyjson_doc *doc = yyjson_read(buf, got,
+                                  YYJSON_READ_ALLOW_COMMENTS | YYJSON_READ_ALLOW_TRAILING_COMMAS |
+                                      YYJSON_READ_ALLOW_BOM);
     free(buf);
     return doc;
 }
@@ -456,7 +459,10 @@ ctx_path_aliases_t *ctx_path_aliases_load(const char *repo_path) {
 
 /* tsconfig governs the JS family only; a Python file under one must not have
  * its dotted module names read as baseUrl paths. */
-static bool pa_is_script(const char *rel) {
+bool ctx_path_aliases_is_script(const char *rel) {
+    if (!rel) {
+        return false;
+    }
     static const char *const exts[] = {".ts",  ".tsx", ".mts", ".cts",  ".js",     ".jsx",
                                        ".mjs", ".cjs", ".vue", ".svelte", ".astro"};
     const char *dot = strrchr(rel, '.');
@@ -517,7 +523,7 @@ static const pa_pattern_t *pa_best_pattern(const pa_patterns_t *ps, const char *
 int ctx_path_aliases_candidates(const ctx_path_aliases_t *aliases, const char *source_rel,
                                 const char *specifier, char **out, int max) {
     if (!aliases || !source_rel || !specifier || !specifier[0] || specifier[0] == '.' ||
-        specifier[0] == '/' || max <= 0 || !pa_is_script(source_rel)) {
+        specifier[0] == '/' || max <= 0 || !ctx_path_aliases_is_script(source_rel)) {
         return 0;
     }
     const pa_scope_t *scope = pa_scope_for(aliases, source_rel);

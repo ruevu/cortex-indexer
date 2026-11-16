@@ -19,12 +19,14 @@
 
 enum { IT_PATH_MAX = 1024 };
 
-/* The module node of the file at path. Extension-less, a dot in the last
- * segment belongs to the file's name (`tag.mapper` is tag.mapper.ts);
- * otherwise the last dot starts its extension (`index.ts`). The module QN
- * strips one extension, so an extension-less path is given a placeholder. */
+/* The node whose qn is the module qn of path, or NULL. Extension-less, a
+ * dot in the last segment belongs to the file's name (`tag.mapper` is
+ * tag.mapper.ts); otherwise the last dot starts its extension (`index.ts`).
+ * The module qn strips one extension, so an extension-less path is given a
+ * placeholder. A Folder shares the module qn of its path; with modules_only
+ * it does not count. */
 static const ctx_gbuf_node_t *it_node_at(const ctx_pipeline_ctx_t *ctx, const char *path,
-                                         bool extensionless) {
+                                         bool extensionless, bool modules_only) {
     char buf[IT_PATH_MAX];
     if (extensionless) {
         int n = snprintf(buf, sizeof(buf), "%s.x", path);
@@ -36,6 +38,9 @@ static const ctx_gbuf_node_t *it_node_at(const ctx_pipeline_ctx_t *ctx, const ch
     char *qn = ctx_pipeline_fqn_module(ctx->project_name, path);
     const ctx_gbuf_node_t *node = qn ? ctx_gbuf_find_by_qn(ctx->gbuf, qn) : NULL;
     free(qn);
+    if (node && modules_only && node->label && strcmp(node->label, "Folder") == 0) {
+        return NULL;
+    }
     return node;
 }
 
@@ -47,12 +52,20 @@ static const char *it_last_dot(const char *path) {
     return dot && dot > seg ? dot : NULL;
 }
 
-/* The module a path names, in TypeScript's order: the file named without its
- * extension (tag.mapper → tag.mapper.ts); the directory's index module (a
- * barrel: `from '../ui'` is ui/index.ts, whose module QN keeps `index`); the
- * file named with its extension (index.ts, or b.js written for b.ts). */
-static const ctx_gbuf_node_t *it_module_node(const ctx_pipeline_ctx_t *ctx, const char *path) {
-    const ctx_gbuf_node_t *node = it_node_at(ctx, path, true);
+/* The module a path names. For a JS-family importer, TypeScript's order: the
+ * file named without its extension (tag.mapper → tag.mapper.ts); the
+ * directory's index module (a barrel: `from '../ui'` is ui/index.ts, whose
+ * module qn keeps `index`); the file named with its extension (index.ts, or
+ * b.js written for b.ts); and only then the Folder itself. For any other
+ * importer the last dot starts an extension, or, in a dotted module path
+ * (Python's `util.deco.register`), the imported symbol, so the path's own
+ * node is the answer, as it always was. */
+static const ctx_gbuf_node_t *it_module_node(const ctx_pipeline_ctx_t *ctx, const char *path,
+                                             bool ts_rules) {
+    if (!ts_rules) {
+        return it_node_at(ctx, path, false, false);
+    }
+    const ctx_gbuf_node_t *node = it_node_at(ctx, path, true, true);
     if (node) {
         return node;
     }
@@ -60,11 +73,11 @@ static const ctx_gbuf_node_t *it_module_node(const ctx_pipeline_ctx_t *ctx, cons
     size_t len = strlen(path);
     int n = snprintf(index, sizeof(index), "%s%sindex", path,
                      len > 0 && path[len - 1] == '/' ? "" : "/");
-    node = n > 0 && (size_t)n < sizeof(index) ? it_node_at(ctx, index, true) : NULL;
-    if (node) {
-        return node;
+    node = n > 0 && (size_t)n < sizeof(index) ? it_node_at(ctx, index, true, true) : NULL;
+    if (!node && it_last_dot(path)) {
+        node = it_node_at(ctx, path, false, true);
     }
-    return it_last_dot(path) ? it_node_at(ctx, path, false) : NULL;
+    return node ? node : it_node_at(ctx, path, true, false);
 }
 
 /* A relative specifier against the importing file, with its last segment
@@ -97,9 +110,14 @@ const ctx_gbuf_node_t *ctx_pipeline_import_target(const ctx_pipeline_ctx_t *ctx,
     if (!ctx || !module_path || !module_path[0]) {
         return NULL;
     }
-    char *relative = source_rel ? it_relative_path(source_rel, module_path) : NULL;
+    bool ts_rules = ctx_path_aliases_is_script(source_rel);
+    char *relative = NULL;
+    if (source_rel) {
+        relative = ts_rules ? it_relative_path(source_rel, module_path)
+                            : ctx_pipeline_resolve_relative_import(source_rel, module_path);
+    }
     if (relative) {
-        const ctx_gbuf_node_t *node = it_module_node(ctx, relative);
+        const ctx_gbuf_node_t *node = it_module_node(ctx, relative, ts_rules);
         free(relative);
         return node;
     }
@@ -109,11 +127,11 @@ const ctx_gbuf_node_t *ctx_pipeline_import_target(const ctx_pipeline_ctx_t *ctx,
     const ctx_gbuf_node_t *node = NULL;
     for (int i = 0; i < n; i++) {
         if (!node) {
-            node = it_module_node(ctx, candidates[i]);
+            node = it_module_node(ctx, candidates[i], ts_rules);
         }
         free(candidates[i]);
     }
-    return node ? node : it_module_node(ctx, module_path);
+    return node ? node : it_module_node(ctx, module_path, ts_rules);
 }
 
 void ctx_pipeline_import_map_from_result(const ctx_pipeline_ctx_t *ctx, const char *source_rel,

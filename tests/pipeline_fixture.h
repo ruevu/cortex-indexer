@@ -18,12 +18,15 @@
 
 #include <stdatomic.h>
 #include <stdbool.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-/* The File nodes pipeline.c's structure pass creates before extraction. That
- * pass is static there; the parallel resolver reads each file's imports from
- * IMPORTS edges, which hang off these nodes. */
+/* The Folder and File nodes pipeline.c's structure pass creates before
+ * extraction. That pass is static there. The Folders matter: a Folder's qn
+ * is the module qn of the same path, so an import of a directory meets the
+ * Folder before its index module, as it does in a real run; IMPORTS edges
+ * hang off the File nodes. */
 static inline void pf_add_file_nodes(ctx_gbuf_t *gbuf, const char *project,
                                      const ctx_file_info_t *files, int file_count) {
     for (int i = 0; i < file_count; i++) {
@@ -32,6 +35,16 @@ static inline void pf_add_file_nodes(ctx_gbuf_t *gbuf, const char *project,
         char *file_qn = ctx_pipeline_fqn_file(project, rel);
         ctx_gbuf_upsert_node(gbuf, "File", slash ? slash + 1 : rel, file_qn, rel, 0, 0, "{}");
         free(file_qn);
+        char dir[512];
+        snprintf(dir, sizeof(dir), "%s", rel);
+        for (char *cut = strrchr(dir, '/'); cut; cut = strrchr(dir, '/')) {
+            *cut = '\0';
+            char *folder_qn = ctx_pipeline_fqn_folder(project, dir);
+            const char *base = strrchr(dir, '/');
+            ctx_gbuf_upsert_node(gbuf, "Folder", base ? base + 1 : dir, folder_qn, dir, 0, 0,
+                                 "{}");
+            free(folder_qn);
+        }
     }
 }
 
@@ -147,6 +160,15 @@ static inline const ctx_gbuf_edge_t *pf_find_edge(const ctx_gbuf_t *gb, const ch
 static inline const ctx_gbuf_edge_t *pf_find_call(const ctx_gbuf_t *gb, const char *from,
                                                   const char *to_qn_suffix) {
     return pf_find_edge(gb, from, "CALLS", to_qn_suffix);
+}
+
+/* The confidence stored on the CALLS edge from `from` to the target ending in
+ * to_qn_suffix, or -1 when there is no such edge. */
+static inline double pf_call_confidence(const ctx_gbuf_t *gb, const char *from,
+                                        const char *to_qn_suffix) {
+    const ctx_gbuf_edge_t *e = pf_find_call(gb, from, to_qn_suffix);
+    const char *c = e && e->properties_json ? strstr(e->properties_json, "\"confidence\":") : NULL;
+    return c ? strtod(c + strlen("\"confidence\":"), NULL) : -1.0;
 }
 
 /* True when a CALLS edge leads from `from` to a target named `to`. */

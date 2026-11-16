@@ -134,6 +134,14 @@ static int setup_import_repo(void) {
                                 "@register\n"
                                 "def handle():\n"
                                 "    pass\n"},
+        /* An absolute Python import: the module path names the package
+         * path and then the symbol (`util.deco.register`). */
+        {"feature/abs_handlers.py", "from util.deco import register\n"
+                                    "\n"
+                                    "\n"
+                                    "@register\n"
+                                    "def handle_abs():\n"
+                                    "    pass\n"},
         /* A barrel: ui/index.ts re-exports what the package's files define.
          * An import of the barrel names module `ui`, where none of these
          * symbols is defined. */
@@ -151,6 +159,24 @@ static int setup_import_repo(void) {
          * package's own, the deeper one an internal helper. */
         {"ui/format.ts", "export function format(): void {}\n"},
         {"ui/internal/deep/format.ts", "export function format(): void {}\n"},
+        /* A package exporting an instance (`toast`, no definition of its own)
+         * beside a class that happens to have a member of the called name. */
+        {"kit/index.ts", "export * from './sheet';\n"},
+        {"kit/sheet.ts", "export class Sheet {\n"
+                         "  static show(): void {}\n"
+                         "}\n"
+                         "export const toast = makeToast();\n"
+                         "export function hideAll(): void {}\n"},
+        {"screens/kit_user.ts", "import { toast } from '../kit';\n"
+                                "import * as kitNs from '../kit';\n"
+                                "\n"
+                                "export function showsToast(): void {\n"
+                                "  toast.show();\n"
+                                "}\n"
+                                "\n"
+                                "export function hidesAll(): void {\n"
+                                "  kitNs.hideAll();\n"
+                                "}\n"},
         /* Same-named definitions beside the importer: nearest by path, but
          * outside the imported package. */
         {"screens/button.ts", "export function Button(): void {}\n"},
@@ -433,6 +459,70 @@ TEST(every_name_imported_from_one_module_resolves) {
     PASS();
 }
 
+/* An import of a package directory is an import of its index module, the
+ * file that holds the re-exports, not of the Folder of the same name. */
+TEST(barrel_import_edge_names_the_index_module) {
+    BOTH_MODES(pf_find_edge(g_seq, "home.ts", "IMPORTS", "ui.index"),
+               pf_find_edge(g_par, "home.ts", "IMPORTS", "ui.index"));
+    PASS();
+}
+
+/* The file-name rules are TypeScript's. A Python module path's last dot
+ * separates the module from the imported symbol, and the import names the
+ * module, as it did before those rules existed. */
+TEST(python_absolute_import_edge_names_the_module) {
+    BOTH_MODES(pf_find_edge(g_seq, "abs_handlers.py", "IMPORTS", "util.deco"),
+               pf_find_edge(g_par, "abs_handlers.py", "IMPORTS", "util.deco"));
+    BOTH_MODES(!pf_find_edge(g_seq, "abs_handlers.py", "IMPORTS", "util.deco.register"),
+               !pf_find_edge(g_par, "abs_handlers.py", "IMPORTS", "util.deco.register"));
+    PASS();
+}
+
+/* The sequential pass creates IMPORTS edges once every file's definitions
+ * exist. Before, a file's edges were made right after its own definitions, so
+ * an import of a file later in the list found no module yet, or a sibling's:
+ * here the importer sits between tag.ts and tag.mapper.ts. */
+TEST(sequential_import_edge_does_not_depend_on_file_order) {
+    char dir[256];
+    snprintf(dir, sizeof(dir), "/tmp/ctx_ord_XXXXXX");
+    ASSERT_NOT_NULL(ctx_mkdtemp(dir));
+    const char *const order[] = {"late/tag.ts", "early/uses.ts", "late/tag.mapper.ts"};
+    const char *const content[] = {
+        "export function mapTag(): void {}\n",
+        "import { mapTag } from '../late/tag.mapper';\n"
+        "\n"
+        "export function usesLate(): void {\n"
+        "  mapTag();\n"
+        "}\n",
+        "export function mapTag(): void {}\n",
+    };
+    for (int i = 0; i < 3; i++) {
+        ASSERT_EQ(ir_write_in(dir, order[i], content[i]), 0);
+    }
+    ctx_discover_opts_t opts = {.mode = CTX_MODE_FULL};
+    ctx_file_info_t *found = NULL;
+    int found_count = 0;
+    ASSERT_EQ(ctx_discover(dir, &opts, &found, &found_count), 0);
+    ASSERT_EQ(found_count, 3);
+    ctx_file_info_t ordered[3];
+    for (int i = 0; i < 3; i++) {
+        for (int j = 0; j < found_count; j++) {
+            if (strcmp(found[j].rel_path, order[i]) == 0) {
+                ordered[i] = found[j];
+            }
+        }
+    }
+    ctx_gbuf_t *seq = pf_run_sequential("ord-test", dir, ordered, 3);
+    bool to_mapper = pf_find_edge(seq, "uses.ts", "IMPORTS", "late.tag.mapper") != NULL;
+    bool to_sibling = pf_find_edge(seq, "uses.ts", "IMPORTS", "late.tag") != NULL;
+    ctx_gbuf_free(seq);
+    ctx_discover_free(found, found_count);
+    th_rmtree(dir);
+    ASSERT(to_mapper);
+    ASSERT(!to_sibling);
+    PASS();
+}
+
 /* `../util/tag.mapper` names util/tag.mapper.ts: the last dot in a
  * specifier is not always an extension's. */
 TEST(dotted_module_name_is_not_an_extension) {
@@ -494,6 +584,35 @@ TEST(barrel_import_with_two_candidates_prefers_the_shallower) {
     PASS();
 }
 
+/* A pick among several same-named definitions in the package is a tie-break,
+ * not knowledge: it must not read as high confidence (0.7 and up). The single
+ * candidate keeps its 0.85. */
+TEST(barrel_import_with_two_candidates_is_not_high_confidence) {
+    BOTH_MODES(pf_call_confidence(g_seq, "formatsHome", "ui.format.format") < 0.7,
+               pf_call_confidence(g_par, "formatsHome", "ui.format.format") < 0.7);
+    BOTH_MODES(pf_call_confidence(g_seq, "formatsHome", "ui.format.format") > 0,
+               pf_call_confidence(g_par, "formatsHome", "ui.format.format") > 0);
+    BOTH_MODES(pf_call_confidence(g_seq, "rendersButton", "ui.button.Button") >= 0.85,
+               pf_call_confidence(g_par, "rendersButton", "ui.button.Button") >= 0.85);
+    PASS();
+}
+
+/* `toast.show()` on a name the package defines nothing for: the import says
+ * where `toast` comes from, not which `show` runs. Another class's member of
+ * that name is a guess and must not be labelled as resolved by the import. */
+/* A namespace import of a barrel reaches the package's top-level functions. */
+TEST(namespace_import_of_barrel_resolves_member_function) {
+    BOTH_MODES(pf_call_resolved_by(g_seq, "hidesAll", "kit.sheet.hideAll", "import_map_suffix"),
+               pf_call_resolved_by(g_par, "hidesAll", "kit.sheet.hideAll", "import_map_suffix"));
+    PASS();
+}
+
+TEST(barrel_member_call_does_not_claim_another_owners_method) {
+    BOTH_MODES(!pf_call_resolved_by(g_seq, "showsToast", "kit.sheet.Sheet.show", "import_map_suffix"),
+               !pf_call_resolved_by(g_par, "showsToast", "kit.sheet.Sheet.show", "import_map_suffix"));
+    PASS();
+}
+
 /* The direct hit is for bare callees only: `client.get()` must not collapse
  * onto the imported `client` itself (upstream afcce2d4). */
 TEST(member_call_on_imported_name_is_not_the_name_itself) {
@@ -540,11 +659,17 @@ SUITE(import_resolution) {
     RUN_TEST(relative_import_resolves_in_both_resolvers);
     RUN_TEST(every_name_imported_from_one_module_resolves);
     RUN_TEST(dotted_module_name_is_not_an_extension);
+    RUN_TEST(barrel_import_edge_names_the_index_module);
+    RUN_TEST(python_absolute_import_edge_names_the_module);
+    RUN_TEST(sequential_import_edge_does_not_depend_on_file_order);
     RUN_TEST(relative_import_reference_is_a_usage_of_the_imported_function);
     RUN_TEST(relative_import_decorator_is_the_imported_one);
     RUN_TEST(barrel_import_resolves_inside_the_package);
     RUN_TEST(barrel_import_member_is_the_named_class_member);
     RUN_TEST(barrel_import_with_two_candidates_prefers_the_shallower);
+    RUN_TEST(barrel_import_with_two_candidates_is_not_high_confidence);
+    RUN_TEST(namespace_import_of_barrel_resolves_member_function);
+    RUN_TEST(barrel_member_call_does_not_claim_another_owners_method);
     RUN_TEST(member_call_on_imported_name_is_not_the_name_itself);
     RUN_TEST(alias_from_extended_base_resolves_into_the_package);
     RUN_TEST(wildcard_alias_resolves_to_the_module);

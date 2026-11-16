@@ -316,6 +316,19 @@ static const char *lookup_in_scope(const ctx_registry_t *r, const char *scope, c
                 continue;
             }
         }
+        /* The tail's first segment must be a module-level name, the only kind a
+         * package exports. When what precedes the tail is itself a definition,
+         * the match is a member of something else (`open` found as
+         * Drawer.open while the call was `Panel.open()`). */
+        char owner[CTX_SZ_512];
+        size_t owner_len = len - tail_len - SKIP_ONE;
+        if (owner_len < sizeof(owner)) {
+            memcpy(owner, qn, owner_len);
+            owner[owner_len] = '\0';
+            if (ctx_ht_get(r->exact, owner)) {
+                continue;
+            }
+        }
         (*matches)++;
         int depth = qn_depth(qn);
         if (!best || depth < best_depth || (depth == best_depth && strcmp(qn, best) < 0)) {
@@ -399,9 +412,13 @@ static ctx_resolution_t resolve_import_map(const ctx_registry_t *r, const char *
         found = lookup_in_scope(r, scope, prefix, true, &matches);
     }
     if (found) {
-        return (ctx_resolution_t){found, "import_map_suffix",
-                                  candidate_count_penalty(CONF_IMPORT_MAP_SUFFIX, matches),
-                                  matches};
+        /* One match is what the import names. Several make the pick a
+         * tie-break (shallowest, then lexicographic), as sure as a suffix
+         * match and no surer. */
+        double confidence = matches == REG_RESOLVED
+                                ? CONF_IMPORT_MAP_SUFFIX
+                                : candidate_count_penalty(CONF_SUFFIX_MATCH, matches);
+        return (ctx_resolution_t){found, "import_map_suffix", confidence, matches};
     }
     return empty_result();
 }

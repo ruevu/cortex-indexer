@@ -358,6 +358,19 @@ static int create_import_edges_for_file(ctx_pipeline_ctx_t *ctx, const CtxFileRe
     return count;
 }
 
+/* Free results held for this pass only (NULL when the run's cache holds them). */
+static void free_held_results(CtxFileResult **own, int file_count) {
+    if (!own) {
+        return;
+    }
+    for (int i = 0; i < file_count; i++) {
+        if (own[i]) {
+            ctx_free_result(own[i]);
+        }
+    }
+    free(own);
+}
+
 int ctx_pipeline_pass_definitions(ctx_pipeline_ctx_t *ctx, const ctx_file_info_t *files,
                                   int file_count) {
     ctx_log_info("pass.start", "pass", "definitions", "files", itoa_log(file_count));
@@ -370,8 +383,18 @@ int ctx_pipeline_pass_definitions(ctx_pipeline_ctx_t *ctx, const ctx_file_info_t
     int total_imports = 0;
     int errors = 0;
 
+    /* IMPORTS edges wait until every file's definitions exist: made right
+     * after a file's own, an import of a file later in the list found no
+     * module yet, or a sibling's (tag.ts for tag.mapper.ts). The results are
+     * held for that, in the run's cache or, without one, for this pass. */
+    CtxFileResult **own = ctx->result_cache
+                              ? NULL
+                              : (CtxFileResult **)calloc((size_t)file_count, sizeof(*own));
+    CtxFileResult **held = ctx->result_cache ? ctx->result_cache : own;
+
     for (int i = 0; i < file_count; i++) {
         if (ctx_pipeline_check_cancel(ctx)) {
+            free_held_results(own, file_count);
             return CTX_NOT_FOUND;
         }
 
@@ -408,16 +431,25 @@ int ctx_pipeline_pass_definitions(ctx_pipeline_ctx_t *ctx, const ctx_file_info_t
         /* Store calls for pass_calls (we save them in the extraction results
          * for now — a future optimization would batch these) */
         total_calls += result->calls.count;
-        total_imports += create_import_edges_for_file(ctx, result, rel);
+        if (!held) {
+            total_imports += create_import_edges_for_file(ctx, result, rel);
+        }
         create_channel_edges_for_file(ctx, result, rel);
 
-        /* Cache or free the extraction result */
-        if (ctx->result_cache) {
-            ctx->result_cache[i] = result;
+        /* Hold or free the extraction result */
+        if (held) {
+            held[i] = result;
         } else {
             ctx_free_result(result);
         }
     }
+
+    for (int i = 0; held && i < file_count; i++) {
+        if (held[i]) {
+            total_imports += create_import_edges_for_file(ctx, held[i], files[i].rel_path);
+        }
+    }
+    free_held_results(own, file_count);
 
     ctx_log_info("pass.done", "pass", "definitions", "defs", itoa_log(total_defs), "calls",
                  itoa_log(total_calls), "imports", itoa_log(total_imports), "errors",

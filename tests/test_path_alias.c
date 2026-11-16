@@ -61,6 +61,10 @@ static int setup_pa_repo(void) {
         {"loop/tsconfig.json", "{ \"extends\": [\"./tsconfig.json\", \"./tsconfig.json\",\n"
                                "               \"./tsconfig.json\"],\n"
                                "  \"compilerOptions\": { \"paths\": { \"#l/*\": [\"l/*\"] } } }\n"},
+        /* Saved with a UTF-8 byte order mark, as some Windows editors do;
+         * TypeScript reads it. */
+        {"bom/tsconfig.json", "\xEF\xBB\xBF"
+                              "{ \"compilerOptions\": { \"paths\": { \"#b/*\": [\"b/*\"] } } }\n"},
         /* Unreadable as JSON: skipped, never fatal. */
         {"bad/tsconfig.json", "{ \"compilerOptions\": { \"paths\": \n"},
     };
@@ -161,6 +165,14 @@ TEST(self_extending_config_loads) {
     PASS();
 }
 
+TEST(config_with_byte_order_mark_loads) {
+    ASSERT_EQ(ensure_pa(), 0);
+    char first[256];
+    ASSERT_GT(first_candidate("bom/main.ts", "#b/a", first, sizeof(first)), 0);
+    ASSERT_STR_EQ(first, "bom/b/a");
+    PASS();
+}
+
 TEST(malformed_config_gives_no_aliases) {
     ASSERT_EQ(ensure_pa(), 0);
     char first[256];
@@ -176,6 +188,7 @@ SUITE(path_alias) {
     RUN_TEST(only_script_files_are_aliased);
     RUN_TEST(package_base_is_skipped_and_own_paths_anchor_at_the_config);
     RUN_TEST(self_extending_config_loads);
+    RUN_TEST(config_with_byte_order_mark_loads);
     RUN_TEST(malformed_config_gives_no_aliases);
     ctx_path_aliases_free(g_pa);
     g_pa = NULL;
