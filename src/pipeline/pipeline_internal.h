@@ -309,6 +309,31 @@ int ctx_parallel_resolve(ctx_pipeline_ctx_t *ctx, const ctx_file_info_t *files, 
  * Re-targets these edges to Route nodes for cross-service traversal. */
 void ctx_pipeline_create_route_nodes(ctx_gbuf_t *gb);
 
+/* May the plain CALLS edge for this resolved call be emitted? (todo T-dt3b)
+ *
+ * A member call on a value (`items.map(...)`, `this.rows.push(x)`) can only
+ * reach a method, so binding it by its last segment to a free function is a
+ * guess the syntax already rules out. Every array `.map` used to land on a
+ * repo function named `map`. Returns false for exactly that shape, in
+ * JS/TS/TSX/Vue/Svelte files:
+ *   - the callee has member syntax (`recv.name`),
+ *   - it was resolved by name alone (unique_name, suffix_match or fuzzy),
+ *   - the target is registered as a `Function`, and
+ *   - the callee is not exactly `root.name` (optionally `root?.name`, with
+ *     any line break before the dot) where the root is a name the file
+ *     imports or a bare `this`/`super`. A namespace, default or named import
+ *     stays bindable even when its path did not resolve. More than one
+ *     segment after any root (`fmt.wrap(x).format`, `ns.inner.f`) is refused,
+ *     because the last segment's receiver is then a property or a call result.
+ * Everything else returns true, so other languages are unchanged.
+ *
+ * Only the plain CALLS edge is withheld: route, HTTP, async and config
+ * classification still run on the resolution, as upstream's equivalent
+ * guard (codebase-memory-mcp PR #840) keeps them. */
+bool ctx_registry_admits_member_call(const ctx_registry_t *r, CtxLanguage lang,
+                                     const char *callee_name, const ctx_resolution_t *res,
+                                     const CtxImportArray *imports);
+
 /* ── Pass function prototypes ────────────────────────────────────── */
 
 int ctx_pipeline_pass_definitions(ctx_pipeline_ctx_t *ctx, const ctx_file_info_t *files,

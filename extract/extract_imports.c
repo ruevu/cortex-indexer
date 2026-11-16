@@ -411,9 +411,18 @@ static bool process_commonjs_require(CtxExtractCtx *ctx, TSNode call) {
     return true;
 }
 
-#define ES_IMPORT_STACK_CAP CTX_SZ_512
+#define ES_IMPORT_STACK_INIT CTX_SZ_512
+#define ES_IMPORT_STACK_GROWTH 2
+/* The stack grows. A fixed one dropped the first children of every node pushed
+ * while it was nearly full, and children are pushed last-first, so a file
+ * with more than 512 top-level statements lost the statements at its top: its
+ * imports. Generated GraphQL modules are that long. */
 static void walk_es_imports(CtxExtractCtx *ctx, TSNode root) {
-    TSNode stack[ES_IMPORT_STACK_CAP];
+    int cap = ES_IMPORT_STACK_INIT;
+    TSNode *stack = malloc((size_t)cap * sizeof(TSNode));
+    if (!stack) {
+        return;
+    }
     int top = 0;
     stack[top++] = root;
 
@@ -435,12 +444,25 @@ static void walk_es_imports(CtxExtractCtx *ctx, TSNode root) {
         }
 
         if (push_children) {
-            uint32_t count = ts_node_child_count(node);
-            for (int i = (int)count - SKIP_ONE; i >= 0 && top < ES_IMPORT_STACK_CAP; i--) {
+            int count = (int)ts_node_child_count(node);
+            if (top + count > cap) {
+                int new_cap = cap;
+                while (top + count > new_cap) {
+                    new_cap *= ES_IMPORT_STACK_GROWTH;
+                }
+                TSNode *grown = realloc(stack, (size_t)new_cap * sizeof(TSNode));
+                if (!grown) {
+                    break;
+                }
+                stack = grown;
+                cap = new_cap;
+            }
+            for (int i = count - SKIP_ONE; i >= 0; i--) {
                 stack[top++] = ts_node_child(node, (uint32_t)i);
             }
         }
     }
+    free(stack);
 }
 
 static void parse_es_imports(CtxExtractCtx *ctx) {

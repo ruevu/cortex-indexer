@@ -220,10 +220,18 @@ static inline const char *tf_reset(void) {
 
 #define SUITE(name) void suite_##name(void)
 
-#define RUN_SUITE(name)                                            \
-    do {                                                           \
-        printf("\n%s=== %s ===%s\n", tf_dim(), #name, tf_reset()); \
-        suite_##name();                                            \
+/* CTX_TEST_SUITE=<name> runs that one suite and skips the rest. The full
+ * sanitizer suite takes hours, so iterating on one suite needs this. Unset or
+ * empty runs everything, as before. */
+#define RUN_SUITE(name)                                                \
+    do {                                                               \
+        const char *tf_only_suite = getenv("CTX_TEST_SUITE");          \
+        if (tf_only_suite && tf_only_suite[0] &&                       \
+            strcmp(tf_only_suite, #name) != 0) {                       \
+            break;                                                     \
+        }                                                              \
+        printf("\n%s=== %s ===%s\n", tf_dim(), #name, tf_reset());     \
+        suite_##name();                                                \
     } while (0)
 
 /* ── Summary ───────────────────────────────────────────────────── */

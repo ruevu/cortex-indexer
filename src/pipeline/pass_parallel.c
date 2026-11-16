@@ -1228,9 +1228,11 @@ static void detect_url_in_args(ctx_gbuf_t *gbuf, const ctx_gbuf_node_t *source,
     }
 }
 
+/* With bind_plain false, the plain CALLS edge is withheld but route/HTTP/async/
+ * config classification still runs (T-dt3b, ctx_registry_admits_member_call). */
 static void emit_service_edge(ctx_gbuf_t *gbuf, const ctx_gbuf_node_t *source,
                               const ctx_gbuf_node_t *target, const CtxCall *call,
-                              const ctx_resolution_t *res, const char *module_qn,
+                              const ctx_resolution_t *res, bool bind_plain, const char *module_qn,
                               const ctx_registry_t *registry, const ctx_gbuf_t *main_gbuf,
                               const char **imp_keys, const char **imp_vals, int imp_count) {
     ctx_svc_kind_t svc = ctx_service_pattern_match(res->qualified_name);
@@ -1260,7 +1262,7 @@ static void emit_service_edge(ctx_gbuf_t *gbuf, const ctx_gbuf_node_t *source,
         emit_http_async_service_edge(gbuf, source, call, res, svc, arg);
     } else if (svc == CTX_SVC_CONFIG) {
         emit_config_edge(gbuf, source, target, call, res, arg);
-    } else {
+    } else if (bind_plain) {
         emit_normal_calls_edge(gbuf, source, target, call, res);
     }
 
@@ -1284,8 +1286,8 @@ static const ctx_gbuf_node_t *find_source_node(const ctx_gbuf_t *gbuf, const cha
 
 /* Resolve calls for one file and emit CALLS/HTTP_CALLS/ASYNC_CALLS edges. */
 static void resolve_file_calls(resolve_ctx_t *rc, resolve_worker_state_t *ws, CtxFileResult *result,
-                               const char *rel, const char *module_qn, const char **imp_keys,
-                               const char **imp_vals, int imp_count) {
+                               const char *rel, CtxLanguage lang, const char *module_qn,
+                               const char **imp_keys, const char **imp_vals, int imp_count) {
     for (int c = 0; c < result->calls.count; c++) {
         CtxCall *call = &result->calls.items[c];
         if (!call->callee_name) {
@@ -1305,7 +1307,7 @@ static void resolve_file_calls(resolve_ctx_t *rc, resolve_worker_state_t *ws, Ct
                                              .confidence = PP_HALF_CONF,
                                              .strategy = "callee_suffix"};
                 emit_service_edge(ws->local_edge_buf, source_node, source_node, call, &fake_res,
-                                  module_qn, rc->registry, rc->main_gbuf, imp_keys, imp_vals,
+                                  true, module_qn, rc->registry, rc->main_gbuf, imp_keys, imp_vals,
                                   imp_count);
             } else {
                 try_emit_global_http_call_parallel(ws->local_edge_buf, source_node, call);
@@ -1316,9 +1318,13 @@ static void resolve_file_calls(resolve_ctx_t *rc, resolve_worker_state_t *ws, Ct
         if (!target_node || source_node->id == target_node->id) {
             continue;
         }
-        emit_service_edge(ws->local_edge_buf, source_node, target_node, call, &res, module_qn,
-                          rc->registry, rc->main_gbuf, imp_keys, imp_vals, imp_count);
-        ws->calls_resolved++;
+        bool bind_plain = ctx_registry_admits_member_call(rc->registry, lang, call->callee_name,
+                                                          &res, &result->imports);
+        emit_service_edge(ws->local_edge_buf, source_node, target_node, call, &res, bind_plain,
+                          module_qn, rc->registry, rc->main_gbuf, imp_keys, imp_vals, imp_count);
+        if (bind_plain) {
+            ws->calls_resolved++;
+        }
     }
 }
 
@@ -1532,7 +1538,8 @@ static void resolve_worker(int worker_id, void *ctx_ptr) {
         char *module_qn = ctx_pipeline_fqn_module(rc->project_name, rel);
 
         /* ── CALLS resolution ──────────────────────────────────── */
-        resolve_file_calls(rc, ws, result, rel, module_qn, imp_keys, imp_vals, imp_count);
+        resolve_file_calls(rc, ws, result, rel, rc->files[file_idx].language, module_qn, imp_keys,
+                           imp_vals, imp_count);
 
         /* ── USAGE resolution ──────────────────────────────────── */
         resolve_file_usages(rc, ws, result, rel, module_qn, imp_keys, imp_vals, imp_count);
