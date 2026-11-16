@@ -22,6 +22,7 @@ enum { REG_INIT_CAP = 16, REG_MIN_CANDIDATES = 3, REG_RESOLVED = 1, REG_SUFFIX_A
 #include "foundation/dyn_array.h"
 #include "foundation/platform.h"
 
+#include <ctype.h>
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -636,6 +637,200 @@ static size_t trim_trailing_layout(const char *s, size_t len) {
     return len;
 }
 
+/* ── Builtin method names on methods (T-byzx item 5) ─────────────── */
+
+/* ECMAScript methods an untyped receiver reaches far more often than any repo
+ * method of the same name: Array, String, Promise, Map/Set and object
+ * iteration, plus React's `ref.current`. Platform and library methods
+ * (`db.close()`, `canvas.fill()`) are deliberately absent: a name list cannot
+ * cover them, so they wait for receiver types. */
+static const char *const BUILTIN_METHOD_NAMES[] = {
+    "replace",  "split",       "join",        "slice",      "splice",   "push",
+    "pop",      "shift",       "unshift",     "map",        "filter",   "reduce",
+    "forEach",  "find",        "findIndex",   "some",       "every",    "includes",
+    "indexOf",  "concat",      "flat",        "flatMap",    "sort",     "reverse",
+    "trim",     "toLowerCase", "toUpperCase", "startsWith", "endsWith", "padStart",
+    "then",     "catch",       "finally",     "resolve",    "reject",   "all",
+    "keys",     "values",      "entries",     "toString",   "toFixed",  "current",
+    "get",      "set",         "has",         "add",        "delete",   "clear",
+};
+
+/* Global namespaces: a call on one reaches the platform, whatever its name.
+ * Lower-case browser and Node globals (`document`, `process`) are left out
+ * because a parameter of that name commonly shadows them. */
+static const char *const GLOBAL_NAMESPACES[] = {
+    "Object", "Array", "JSON",    "Math",   "Promise", "Number",
+    "String", "Date",  "Reflect", "Symbol", "Intl",    "console",
+};
+
+enum { IDENT_MAX_WORDS = 16, IDENT_WORD_SZ = 64, IDENT_MIN_WORD = 3, IDENT_MIN_PREFIX = 4 };
+
+typedef struct {
+    char text[IDENT_WORD_SZ];
+    size_t len;
+} ident_word_t;
+
+static bool in_list(const char *s, size_t len, const char *const *list, size_t count) {
+    for (size_t i = 0; i < count; i++) {
+        if (strlen(list[i]) == len && strncmp(list[i], s, len) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool is_ident_char(char c) {
+    return isalnum((unsigned char)c) || c == '_' || c == '$';
+}
+
+/* Does the word at `s[i]` end here? `fooBar` breaks before `B`; an acronym
+ * breaks before its last capital when a lower-case letter follows
+ * (`HTTPClient` → `HTTP`, `Client`). */
+static bool camel_break(const char *s, size_t len, size_t i) {
+    unsigned char prev = (unsigned char)s[i - SKIP_ONE];
+    unsigned char cur = (unsigned char)s[i];
+    if (!isupper(cur)) {
+        return false;
+    }
+    if (islower(prev) || isdigit(prev)) {
+        return true;
+    }
+    return isupper(prev) && i + SKIP_ONE < len && islower((unsigned char)s[i + SKIP_ONE]);
+}
+
+/* Split an identifier into lower-cased camel-case words. One trailing `s` is
+ * dropped so `todos` and `Todo` agree, and words shorter than three letters
+ * (`r`, `by`) are skipped as carrying no evidence. */
+static int ident_words(const char *s, size_t len, ident_word_t *out, int max) {
+    int n = 0;
+    size_t i = 0;
+    while (i < len && n < max) {
+        while (i < len && !isalnum((unsigned char)s[i])) {
+            i++;
+        }
+        if (i >= len) {
+            break;
+        }
+        size_t start = i++;
+        while (i < len && isalnum((unsigned char)s[i]) && !camel_break(s, len, i)) {
+            i++;
+        }
+        size_t wlen = i - start;
+        if (wlen >= IDENT_WORD_SZ) {
+            wlen = IDENT_WORD_SZ - SKIP_ONE;
+        }
+        for (size_t k = 0; k < wlen; k++) {
+            out[n].text[k] = (char)tolower((unsigned char)s[start + k]);
+        }
+        if (wlen > SKIP_ONE && out[n].text[wlen - SKIP_ONE] == 's') {
+            wlen--;
+        }
+        out[n].text[wlen] = '\0';
+        out[n].len = wlen;
+        if (wlen >= IDENT_MIN_WORD) {
+            n++;
+        }
+    }
+    return n;
+}
+
+/* The class segment of a method QN: `proj.mod.TodoRepository.get` → `TodoRepository`. */
+static bool owner_class(const char *target_qn, char *buf, size_t size) {
+    const char *last = strrchr(target_qn, '.');
+    if (!last || last == target_qn) {
+        return false;
+    }
+    const char *start = last - SKIP_ONE;
+    while (start > target_qn && *start != '.') {
+        start--;
+    }
+    if (*start == '.') {
+        start++;
+    }
+    size_t len = (size_t)(last - start);
+    if (len == 0 || len >= size) {
+        return false;
+    }
+    memcpy(buf, start, len);
+    buf[len] = '\0';
+    return true;
+}
+
+/* Does the receiver text carry evidence for the target's class?
+ *   - the class name is one of its identifiers: `new TodoRepository().get`,
+ *     `inject(HistoryStack).push`;
+ *   - or its trailing identifier shares a word with the class name, whole or
+ *     as an abbreviation of four letters or more: `historyStack` for
+ *     `HistoryStack`; `this.todos`, `todosRepo` and `repo` for `TodoRepository`;
+ *     `cache` for `JSONCache`. */
+static bool receiver_names_class(const char *recv, size_t len, const char *owner) {
+    size_t owner_len = strlen(owner);
+    size_t i = 0;
+    while (i < len) {
+        if (!is_ident_char(recv[i])) {
+            i++;
+            continue;
+        }
+        size_t start = i;
+        while (i < len && is_ident_char(recv[i])) {
+            i++;
+        }
+        if (i - start == owner_len && strncmp(recv + start, owner, owner_len) == 0) {
+            return true;
+        }
+    }
+    if (len == 0 || !is_ident_char(recv[len - SKIP_ONE])) {
+        return false; /* a call result or an index: no name of its own */
+    }
+    size_t start = len;
+    while (start > 0 && is_ident_char(recv[start - SKIP_ONE])) {
+        start--;
+    }
+    ident_word_t rw[IDENT_MAX_WORDS];
+    ident_word_t cw[IDENT_MAX_WORDS];
+    int rn = ident_words(recv + start, len - start, rw, IDENT_MAX_WORDS);
+    int cn = ident_words(owner, owner_len, cw, IDENT_MAX_WORDS);
+    for (int a = 0; a < rn; a++) {
+        for (int b = 0; b < cn; b++) {
+            if (rw[a].len == cw[b].len && strcmp(rw[a].text, cw[b].text) == 0) {
+                return true;
+            }
+            if (rw[a].len >= IDENT_MIN_PREFIX && rw[a].len < cw[b].len &&
+                strncmp(cw[b].text, rw[a].text, rw[a].len) == 0) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+/* A name-guessed member call reaching a method (not a Function). Refused when
+ * the receiver is a global namespace or the method name is a builtin, unless
+ * the receiver is `this`/`super` or names the method's class. */
+static bool admits_method_guess(const char *callee_name, const char *target_qn) {
+    const char *last_dot = strrchr(callee_name, '.');
+    size_t recv_len = trim_trailing_layout(callee_name, (size_t)(last_dot - callee_name));
+    while (recv_len > 0 &&
+           (callee_name[recv_len - SKIP_ONE] == '?' || callee_name[recv_len - SKIP_ONE] == '!')) {
+        recv_len = trim_trailing_layout(callee_name, recv_len - SKIP_ONE); /* `a?.b`, `a!.b` */
+    }
+    if (root_is(callee_name, recv_len, "this") || root_is(callee_name, recv_len, "super")) {
+        return true;
+    }
+    char owner[CTX_SZ_256];
+    if (owner_class(target_qn, owner, sizeof(owner)) &&
+        receiver_names_class(callee_name, recv_len, owner)) {
+        return true;
+    }
+    if (in_list(callee_name, recv_len, GLOBAL_NAMESPACES,
+                sizeof(GLOBAL_NAMESPACES) / sizeof(GLOBAL_NAMESPACES[0]))) {
+        return false;
+    }
+    const char *method = last_dot + SKIP_ONE;
+    return !in_list(method, trim_trailing_layout(method, strlen(method)), BUILTIN_METHOD_NAMES,
+                    sizeof(BUILTIN_METHOD_NAMES) / sizeof(BUILTIN_METHOD_NAMES[0]));
+}
+
 bool ctx_registry_admits_member_call(const ctx_registry_t *r, CtxLanguage lang,
                                      const char *callee_name, const ctx_resolution_t *res,
                                      const CtxImportArray *imports) {
@@ -653,8 +848,13 @@ bool ctx_registry_admits_member_call(const ctx_registry_t *r, CtxLanguage lang,
         return true;
     }
     const char *label = ctx_registry_label_of(r, res->qualified_name);
-    if (!label || strcmp(label, "Function") != 0) {
-        return true; /* methods and classes are what member calls reach */
+    if (!label) {
+        return true;
+    }
+    if (strcmp(label, "Function") != 0) {
+        /* Methods and classes are what member calls reach, but a guess by a
+         * builtin name, or on a global namespace, reaches the builtin. */
+        return admits_method_guess(callee_name, res->qualified_name);
     }
     if (strchr(dot + SKIP_ONE, '.') != NULL) {
         /* `fmt.wrap(x).format()`, `ns.inner.f()`, `this.rows.map()`: the
