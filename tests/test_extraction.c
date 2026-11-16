@@ -2050,6 +2050,34 @@ TEST(js_imports) {
     PASS();
 }
 
+/* The import walk used a fixed 512-slot stack and pushed the root's children
+ * last-first, so a file with more top-level statements than that never reached
+ * its first ones, which is where the imports are. Generated GraphQL modules
+ * run to thousands of top-level statements. */
+TEST(es_imports_survive_many_top_level_statements) {
+    enum { STATEMENTS = 600 };
+    size_t cap = (size_t)STATEMENTS * 48 + 128;
+    char *src = malloc(cap);
+    ASSERT_NOT_NULL(src);
+    size_t len = (size_t)snprintf(src, cap, "import * as Hooks from '@apollo/client';\n");
+    for (int i = 0; i < STATEMENTS; i++) {
+        len += (size_t)snprintf(src + len, cap - len, "export const doc%d = Hooks.use(%d);\n", i, i);
+    }
+    CtxFileResult *r = extract(src, CTX_LANG_TYPESCRIPT, "t", "generated.ts");
+    free(src);
+    ASSERT_NOT_NULL(r);
+    bool found = false;
+    for (int i = 0; i < r->imports.count; i++) {
+        const char *name = r->imports.items[i].local_name;
+        if (name && strcmp(name, "Hooks") == 0) {
+            found = true;
+        }
+    }
+    ctx_free_result(r);
+    ASSERT_TRUE(found);
+    PASS();
+}
+
 TEST(go_imports) {
     CtxFileResult *r =
         extract("package main\n\nimport \"fmt\"\nimport (\n    \"os\"\n    net \"net/http\"\n)\n",
@@ -3090,6 +3118,7 @@ SUITE(extraction) {
     RUN_TEST(go_calls);
     RUN_TEST(python_imports);
     RUN_TEST(js_imports);
+    RUN_TEST(es_imports_survive_many_top_level_statements);
     RUN_TEST(go_imports);
     RUN_TEST(java_imports);
     RUN_TEST(rust_imports);
