@@ -343,14 +343,7 @@ static int create_import_edges_for_file(ctx_pipeline_ctx_t *ctx, const CtxFileRe
         if (!imp->module_path) {
             continue;
         }
-        char *target_qn = NULL;
-        char *resolved = ctx_pipeline_resolve_relative_import(rel, imp->module_path);
-        if (resolved) {
-            target_qn = ctx_pipeline_fqn_module(ctx->project_name, resolved);
-            free(resolved);
-        } else {
-            target_qn = ctx_pipeline_fqn_module(ctx->project_name, imp->module_path);
-        }
+        char *target_qn = ctx_pipeline_import_module_qn(ctx->project_name, rel, imp->module_path);
         const ctx_gbuf_node_t *target = ctx_gbuf_find_by_qn(ctx->gbuf, target_qn);
         char *file_qn = ctx_pipeline_fqn_file(ctx->project_name, rel);
         const ctx_gbuf_node_t *source_node = ctx_gbuf_find_by_qn(ctx->gbuf, file_qn);

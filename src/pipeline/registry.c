@@ -312,16 +312,31 @@ static ctx_resolution_t resolve_import_map(const ctx_registry_t *r, const char *
         return empty_result();
     }
 
-    /* Build candidate: resolved.suffix or just resolved */
+    /* The map value is either the imported symbol itself (Python's
+     * `from m import f` maps f to m.f) or the module it came from (an ES
+     * `import { f } from './m'` maps f to the module m). Try the symbol reading
+     * first, then the module reading: the imported name inside the module.
+     *
+     * The bare `resolved` hit is for suffix-less callees only. For `f.get()`
+     * the callee is a member of f, never f itself. */
     char candidate[CTX_SZ_512];
+    const char *stored_key = NULL;
     if (suffix && suffix[0]) {
         snprintf(candidate, sizeof(candidate), "%s.%s", resolved, suffix);
+        stored_key = ctx_ht_get_key(r->exact, candidate);
+        if (!stored_key) {
+            snprintf(candidate, sizeof(candidate), "%s.%s.%s", resolved, prefix, suffix);
+            stored_key = ctx_ht_get_key(r->exact, candidate);
+        }
     } else {
-        snprintf(candidate, sizeof(candidate), "%s", resolved);
+        stored_key = ctx_ht_get_key(r->exact, resolved);
+        if (!stored_key) {
+            snprintf(candidate, sizeof(candidate), "%s.%s", resolved, prefix);
+            stored_key = ctx_ht_get_key(r->exact, candidate);
+        }
     }
-    /* Use ctx_ht_get_key to get the persistent heap-owned key string */
-    const char *stored_key = ctx_ht_get_key(r->exact, candidate);
     if (stored_key) {
+        /* ctx_ht_get_key returns the registry's persistent heap-owned key. */
         return (ctx_resolution_t){stored_key, "import_map", CONF_IMPORT_MAP, REG_RESOLVED};
     }
 

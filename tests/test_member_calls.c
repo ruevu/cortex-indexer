@@ -12,16 +12,12 @@
 #include "../src/foundation/compat.h"
 #include "test_framework.h"
 #include "test_helpers.h"
-#include "pipeline/pipeline.h"
-#include "pipeline/pipeline_internal.h"
-#include "graph_buffer/graph_buffer.h"
+#include "pipeline_fixture.h"
 #include "discover/discover.h"
 #include "foundation/platform.h"
-#include "extract.h"
 
 #include <stdlib.h>
 #include <string.h>
-#include <stdatomic.h>
 #include <stdbool.h>
 
 static char g_mc_tmpdir[256];
@@ -132,56 +128,6 @@ static int setup_member_call_repo(void) {
     return 0;
 }
 
-static ctx_gbuf_t *run_sequential(const char *project, ctx_file_info_t *files, int file_count) {
-    ctx_gbuf_t *gbuf = ctx_gbuf_new(project, g_mc_tmpdir);
-    ctx_registry_t *reg = ctx_registry_new();
-    atomic_int cancelled;
-    atomic_init(&cancelled, 0);
-    ctx_pipeline_ctx_t ctx = {
-        .project_name = project,
-        .repo_path = g_mc_tmpdir,
-        .gbuf = gbuf,
-        .registry = reg,
-        .cancelled = &cancelled,
-    };
-    ctx_init();
-    ctx_pipeline_pass_definitions(&ctx, files, file_count);
-    ctx_pipeline_pass_calls(&ctx, files, file_count);
-    ctx_registry_free(reg);
-    return gbuf;
-}
-
-static ctx_gbuf_t *run_parallel(const char *project, ctx_file_info_t *files, int file_count) {
-    ctx_gbuf_t *gbuf = ctx_gbuf_new(project, g_mc_tmpdir);
-    ctx_registry_t *reg = ctx_registry_new();
-    atomic_int cancelled;
-    atomic_init(&cancelled, 0);
-    ctx_pipeline_ctx_t ctx = {
-        .project_name = project,
-        .repo_path = g_mc_tmpdir,
-        .gbuf = gbuf,
-        .registry = reg,
-        .cancelled = &cancelled,
-    };
-    _Atomic int64_t shared_ids;
-    atomic_init(&shared_ids, ctx_gbuf_next_id(gbuf));
-    CtxFileResult **cache = calloc(file_count, sizeof(CtxFileResult *));
-    ctx_init();
-    ctx_parallel_extract(&ctx, files, file_count, cache, &shared_ids, 2);
-    ctx_gbuf_set_next_id(gbuf, atomic_load(&shared_ids));
-    ctx_build_registry_from_cache(&ctx, files, file_count, cache);
-    ctx_parallel_resolve(&ctx, files, file_count, cache, &shared_ids, 2);
-    ctx_gbuf_set_next_id(gbuf, atomic_load(&shared_ids));
-    for (int i = 0; i < file_count; i++) {
-        if (cache[i]) {
-            ctx_free_result(cache[i]);
-        }
-    }
-    free(cache);
-    ctx_registry_free(reg);
-    return gbuf;
-}
-
 static ctx_gbuf_t *g_seq = NULL;
 static ctx_gbuf_t *g_par = NULL;
 static bool g_mc_ready = false;
@@ -199,43 +145,15 @@ static int ensure_member_call_graphs(void) {
     if (ctx_discover(g_mc_tmpdir, &opts, &files, &file_count) != 0) {
         return -1;
     }
-    g_seq = run_sequential("mc-test", files, file_count);
-    g_par = run_parallel("mc-test", files, file_count);
+    g_seq = pf_run_sequential("mc-test", g_mc_tmpdir, files, file_count);
+    g_par = pf_run_parallel("mc-test", g_mc_tmpdir, files, file_count);
     ctx_discover_free(files, file_count);
     g_mc_ready = true;
     return 0;
 }
 
-/* True when a CALLS edge leads from the definition named `from` to one named `to`. */
-static bool has_call(const ctx_gbuf_t *gb, const char *from, const char *to) {
-    const ctx_gbuf_node_t **sources = NULL;
-    int source_count = 0;
-    if (ctx_gbuf_find_by_name(gb, from, &sources, &source_count) != 0) {
-        return false;
-    }
-    for (int s = 0; s < source_count; s++) {
-        const ctx_gbuf_edge_t **edges = NULL;
-        int edge_count = 0;
-        if (ctx_gbuf_find_edges_by_source_type(gb, sources[s]->id, "CALLS", &edges, &edge_count) !=
-            0) {
-            continue;
-        }
-        for (int e = 0; e < edge_count; e++) {
-            const ctx_gbuf_node_t *target = ctx_gbuf_find_by_id(gb, edges[e]->target_id);
-            if (target && target->name && strcmp(target->name, to) == 0) {
-                return true;
-            }
-        }
-    }
-    return false;
-}
-
-/* The source definition must exist, or a missing edge would prove nothing. */
-static bool has_def(const ctx_gbuf_t *gb, const char *name) {
-    const ctx_gbuf_node_t **nodes = NULL;
-    int count = 0;
-    return ctx_gbuf_find_by_name(gb, name, &nodes, &count) == 0 && count > 0;
-}
+#define has_call pf_has_call
+#define has_def pf_has_def
 
 #define BOTH_MODES(expr_seq, expr_par)                                                             \
     do {                                                                                           \

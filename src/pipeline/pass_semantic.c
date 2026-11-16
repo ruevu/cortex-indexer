@@ -80,7 +80,8 @@ static int build_import_map(ctx_pipeline_ctx_t *ctx, const char *rel_path,
             if (!imp->local_name || !imp->local_name[0] || !imp->module_path) {
                 continue;
             }
-            char *target_qn = ctx_pipeline_fqn_module(ctx->project_name, imp->module_path);
+            char *target_qn =
+                ctx_pipeline_import_module_qn(ctx->project_name, rel_path, imp->module_path);
             const ctx_gbuf_node_t *target = ctx_gbuf_find_by_qn(ctx->gbuf, target_qn);
             free(target_qn);
             if (!target) {

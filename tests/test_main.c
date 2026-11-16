@@ -50,6 +50,7 @@ extern void suite_system_info(void);
 extern void suite_worker_pool(void);
 extern void suite_parallel(void);
 extern void suite_member_calls(void);
+extern void suite_import_resolution(void);
 extern void suite_mem(void);
 extern void suite_security(void);
 extern void suite_yaml(void);
@@ -133,6 +134,7 @@ int main(void) {
     /* Parallel pipeline */
     RUN_SUITE(parallel);
     RUN_SUITE(member_calls);
+    RUN_SUITE(import_resolution);
 
     /* mem + arena + slab integration */
     RUN_SUITE(mem);

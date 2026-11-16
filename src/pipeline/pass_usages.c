@@ -76,9 +76,9 @@ static bool is_checked_exception(const char *name) {
 }
 
 /* Build import map from cached extraction result (fast path). */
-static int build_import_map_from_cache(ctx_pipeline_ctx_t *ctx, const CtxFileResult *result,
-                                       const char ***out_keys, const char ***out_vals,
-                                       int *out_count) {
+static int build_import_map_from_cache(ctx_pipeline_ctx_t *ctx, const char *rel_path,
+                                       const CtxFileResult *result, const char ***out_keys,
+                                       const char ***out_vals, int *out_count) {
     const char **keys = calloc((size_t)result->imports.count, sizeof(const char *));
     const char **vals = calloc((size_t)result->imports.count, sizeof(const char *));
     int count = 0;
@@ -88,7 +88,8 @@ static int build_import_map_from_cache(ctx_pipeline_ctx_t *ctx, const CtxFileRes
         if (!imp->local_name || !imp->local_name[0] || !imp->module_path) {
             continue;
         }
-        char *target_qn = ctx_pipeline_fqn_module(ctx->project_name, imp->module_path);
+        char *target_qn =
+            ctx_pipeline_import_module_qn(ctx->project_name, rel_path, imp->module_path);
         const ctx_gbuf_node_t *target = ctx_gbuf_find_by_qn(ctx->gbuf, target_qn);
         free(target_qn);
         if (!target) {
@@ -162,7 +163,7 @@ static int build_import_map(ctx_pipeline_ctx_t *ctx, const char *rel_path,
     *out_count = 0;
 
     if (result && result->imports.count > 0) {
-        return build_import_map_from_cache(ctx, result, out_keys, out_vals, out_count);
+        return build_import_map_from_cache(ctx, rel_path, result, out_keys, out_vals, out_count);
     }
     return build_import_map_from_edges(ctx, rel_path, out_keys, out_vals, out_count);
 }
