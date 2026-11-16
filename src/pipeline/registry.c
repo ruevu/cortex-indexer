@@ -126,8 +126,30 @@ static const char *best_by_import_distance(const char **candidates, int count,
 
 /* Check if candidate's module prefix appears in import map values.
  * Uses stack buffer to avoid malloc/free per call in hot resolution loop. */
-static bool is_import_reachable(const char *candidate_qn, const char **import_vals,
-                                int import_count) {
+/* The scope an import value stands for. An index module (`ui.index`, a
+ * barrel) stands for its directory, the package; the definitions in the index
+ * file are qualified by the directory too (`ui.Button` for a Button declared in
+ * ui/index.ts). Any other value is its own scope. Returns val or buf. */
+static const char *import_scope(const char *val, char *buf, size_t size) {
+    static const char index_seg[] = ".index";
+    size_t seg_len = sizeof(index_seg) - SKIP_ONE;
+    size_t len = strlen(val);
+    if (len <= seg_len || strcmp(val + len - seg_len, index_seg) != 0 || len - seg_len >= size) {
+        return val;
+    }
+    memcpy(buf, val, len - seg_len);
+    buf[len - seg_len] = '\0';
+    return buf;
+}
+
+/* How a candidate is reachable through the caller's imports: through an
+ * imported module itself, only through the package a barrel import stands
+ * for, or not at all. A guess keeps to the strongest reach it finds, so a
+ * module the caller names outranks the rest of a package it also imports
+ * whole. */
+enum { REACH_NONE = 0, REACH_PACKAGE = 1, REACH_MODULE = 2 };
+
+static int import_reach(const char *candidate_qn, const char **import_vals, int import_count) {
     char cand_mod[CTX_SZ_512];
     const char *last = strrchr(candidate_qn, '.');
     if (last) {
@@ -140,12 +162,24 @@ static bool is_import_reachable(const char *candidate_qn, const char **import_va
     } else {
         snprintf(cand_mod, sizeof(cand_mod), "%s", candidate_qn);
     }
+    int reach = REACH_NONE;
     for (int i = 0; i < import_count; i++) {
-        if (strstr(cand_mod, import_vals[i]) || strstr(import_vals[i], cand_mod)) {
-            return true;
+        const char *val = import_vals[i];
+        if (strstr(cand_mod, val) || strstr(val, cand_mod)) {
+            return REACH_MODULE;
+        }
+        char scope_buf[CTX_SZ_512];
+        const char *scope = import_scope(val, scope_buf, sizeof(scope_buf));
+        if (scope != val && (strstr(cand_mod, scope) || strstr(scope, cand_mod))) {
+            reach = REACH_PACKAGE;
         }
     }
-    return false;
+    return reach;
+}
+
+static bool is_import_reachable(const char *candidate_qn, const char **import_vals,
+                                int import_count) {
+    return import_reach(candidate_qn, import_vals, import_count) != REACH_NONE;
 }
 
 /* Scale confidence inversely with candidate count. */
@@ -269,27 +303,74 @@ int ctx_registry_size(const ctx_registry_t *r) {
 
 /* ── Resolution ──────────────────────────────────────────────────── */
 
-/* Callback context for import_map_suffix scan */
-struct ims_ctx {
-    const char *resolved_dot; /* "proj.other." */
-    size_t resolved_dot_len;
-    const char *dot_suffix; /* ".Foo" */
-    size_t dot_suffix_len;
-    const char *found_key;
-};
+static int qn_depth(const char *qn) {
+    int depth = 0;
+    for (; *qn; qn++) {
+        depth += *qn == '.';
+    }
+    return depth;
+}
 
-static void ims_scan(const char *key, void *value, void *ud) {
-    (void)value;
-    struct ims_ctx *ctx = ud;
-    if (ctx->found_key) {
-        return; /* already found */
+/* The registered definition under `scope` (a QN prefix, matched up to a
+ * segment boundary) whose QN ends with the whole segments `tail`
+ * ("format", or "Panel.open"). Found through the by-name index, keyed by
+ * tail's last segment, so it costs one bucket, not a registry scan.
+ *
+ * This is how an import reaches a barrel: `import { Button } from './ui'`
+ * names the module ui/index.ts, which defines nothing it re-exports, so the
+ * definition is looked for anywhere inside the package instead.
+ *
+ * bare: a bare call reaches a Function or a Class, never a Method.
+ * Several matches: the shallowest QN (nearest the package's root), then the
+ * lexicographically smallest, so the answer never depends on hash order.
+ * *matches is set to how many qualified. */
+static const char *lookup_in_scope(const ctx_registry_t *r, const char *scope, const char *tail,
+                                   bool bare, int *matches) {
+    *matches = 0;
+    const char *last_dot = strrchr(tail, '.');
+    qn_array_t *arr = ctx_ht_get(r->by_name, last_dot ? last_dot + SKIP_ONE : tail);
+    if (!arr) {
+        return NULL;
     }
-    size_t klen = strlen(key);
-    if (klen >= ctx->resolved_dot_len + ctx->dot_suffix_len &&
-        strncmp(key, ctx->resolved_dot, ctx->resolved_dot_len) == 0 &&
-        strcmp(key + klen - ctx->dot_suffix_len, ctx->dot_suffix) == 0) {
-        ctx->found_key = key;
+    size_t scope_len = strlen(scope);
+    size_t tail_len = strlen(tail);
+    const char *best = NULL;
+    int best_depth = 0;
+    for (int i = 0; i < arr->count; i++) {
+        const char *qn = arr->items[i];
+        size_t len = strlen(qn);
+        if (len < scope_len + SKIP_ONE + tail_len || strncmp(qn, scope, scope_len) != 0 ||
+            qn[scope_len] != '.' || strcmp(qn + len - tail_len, tail) != 0 ||
+            qn[len - tail_len - SKIP_ONE] != '.') {
+            continue;
+        }
+        if (bare) {
+            const char *label = ctx_ht_get(r->exact, qn);
+            if (!label || (strcmp(label, "Function") != 0 && strcmp(label, "Class") != 0)) {
+                continue;
+            }
+        }
+        /* The tail's first segment must be a module-level name, the only kind a
+         * package exports. When what precedes the tail is itself a definition,
+         * the match is a member of something else (`open` found as
+         * Drawer.open while the call was `Panel.open()`). */
+        char owner[CTX_SZ_512];
+        size_t owner_len = len - tail_len - SKIP_ONE;
+        if (owner_len < sizeof(owner)) {
+            memcpy(owner, qn, owner_len);
+            owner[owner_len] = '\0';
+            if (ctx_ht_get(r->exact, owner)) {
+                continue;
+            }
+        }
+        (*matches)++;
+        int depth = qn_depth(qn);
+        if (!best || depth < best_depth || (depth == best_depth && strcmp(qn, best) < 0)) {
+            best = qn;
+            best_depth = depth;
+        }
     }
+    return best ? ctx_ht_get_key(r->exact, best) : NULL;
 }
 
 /* Strategy 1: Import map lookup (exact → suffix fallback) */
@@ -312,38 +393,63 @@ static ctx_resolution_t resolve_import_map(const ctx_registry_t *r, const char *
         return empty_result();
     }
 
-    /* Build candidate: resolved.suffix or just resolved */
+    /* The map value is either the imported symbol itself (Python's
+     * `from m import f` maps f to m.f) or the module it came from (an ES
+     * `import { f } from './m'` maps f to the module m). Try the symbol reading
+     * first, then the module reading: the imported name inside the module.
+     *
+     * The bare `resolved` hit is for suffix-less callees only. For `f.get()`
+     * the callee is a member of f, never f itself. The module reading is
+     * tried against the module's scope too: a name declared in a barrel's own
+     * index file is qualified by the directory. */
+    char scope[CTX_SZ_512];
+    const char *scope_qn = import_scope(resolved, scope, sizeof(scope));
+    const char *bases[] = {resolved, scope_qn};
+    int base_count = scope_qn == resolved ? 1 : 2;
     char candidate[CTX_SZ_512];
-    if (suffix && suffix[0]) {
-        snprintf(candidate, sizeof(candidate), "%s.%s", resolved, suffix);
-    } else {
-        snprintf(candidate, sizeof(candidate), "%s", resolved);
+    const char *stored_key = suffix && suffix[0] ? NULL : ctx_ht_get_key(r->exact, resolved);
+    for (int b = 0; b < base_count && !stored_key; b++) {
+        if (suffix && suffix[0]) {
+            snprintf(candidate, sizeof(candidate), "%s.%s", bases[b], suffix);
+            stored_key = ctx_ht_get_key(r->exact, candidate);
+            if (!stored_key) {
+                snprintf(candidate, sizeof(candidate), "%s.%s.%s", bases[b], prefix, suffix);
+                stored_key = ctx_ht_get_key(r->exact, candidate);
+            }
+        } else {
+            snprintf(candidate, sizeof(candidate), "%s.%s", bases[b], prefix);
+            stored_key = ctx_ht_get_key(r->exact, candidate);
+        }
     }
-    /* Use ctx_ht_get_key to get the persistent heap-owned key string */
-    const char *stored_key = ctx_ht_get_key(r->exact, candidate);
     if (stored_key) {
+        /* ctx_ht_get_key returns the registry's persistent heap-owned key. */
         return (ctx_resolution_t){stored_key, "import_map", CONF_IMPORT_MAP, REG_RESOLVED};
     }
 
-    /* import_map_suffix fallback: scan for QNs starting with resolved+"."
-     * and ending with "."+suffix */
+    /* import_map_suffix: no exact hit, so look inside the imported module's
+     * scope. A barrel (ui/index.ts, module `ui.index`) defines nothing it
+     * re-exports; its scope is its directory, the package. A member call
+     * tries the imported name as its owner first (`Panel.open` → Panel's
+     * open), then the member alone (`ns.format` on a namespace import). */
+    int matches = 0;
+    const char *found = NULL;
     if (suffix && suffix[0]) {
-        char resolved_dot[CTX_SZ_512];
-        char dot_suffix[CTX_SZ_256];
-        snprintf(resolved_dot, sizeof(resolved_dot), "%s.", resolved);
-        snprintf(dot_suffix, sizeof(dot_suffix), ".%s", suffix);
-        struct ims_ctx ctx = {
-            .resolved_dot = resolved_dot,
-            .resolved_dot_len = strlen(resolved_dot),
-            .dot_suffix = dot_suffix,
-            .dot_suffix_len = strlen(dot_suffix),
-            .found_key = NULL,
-        };
-        ctx_ht_foreach(r->exact, ims_scan, &ctx);
-        if (ctx.found_key) {
-            return (ctx_resolution_t){ctx.found_key, "import_map_suffix", CONF_IMPORT_MAP_SUFFIX,
-                                      REG_RESOLVED};
+        snprintf(candidate, sizeof(candidate), "%s.%s", prefix, suffix);
+        found = lookup_in_scope(r, scope_qn, candidate, false, &matches);
+        if (!found) {
+            found = lookup_in_scope(r, scope_qn, suffix, false, &matches);
         }
+    } else {
+        found = lookup_in_scope(r, scope_qn, prefix, true, &matches);
+    }
+    if (found) {
+        /* One match is what the import names. Several make the pick a
+         * tie-break (shallowest, then lexicographic), as sure as a suffix
+         * match and no surer. */
+        double confidence = matches == REG_RESOLVED
+                                ? CONF_IMPORT_MAP_SUFFIX
+                                : candidate_count_penalty(CONF_SUFFIX_MATCH, matches);
+        return (ctx_resolution_t){found, "import_map_suffix", confidence, matches};
     }
     return empty_result();
 }
@@ -368,15 +474,33 @@ static ctx_resolution_t resolve_same_module(const ctx_registry_t *r, const char 
 }
 
 /* Strategy 4: multiple candidates with import filtering. */
+/* The candidates at the strongest import reach any of them has (none when
+ * nothing is reachable), up to max_out. Returns how many were kept. */
+static int filter_import_reachable(const char **candidates, int count, const char **import_vals,
+                                   int import_count, const char **out, int max_out) {
+    int n = 0;
+    int top = REACH_NONE;
+    for (int i = 0; i < count; i++) {
+        int reach = import_reach(candidates[i], import_vals, import_count);
+        if (reach == REACH_NONE || reach < top) {
+            continue;
+        }
+        if (reach > top) {
+            top = reach;
+            n = 0;
+        }
+        if (n < max_out) {
+            out[n++] = candidates[i];
+        }
+    }
+    return n;
+}
+
 static ctx_resolution_t resolve_multi_with_imports(const qn_array_t *arr, const char *module_qn,
                                                    const char **import_vals, int import_count) {
     const char *filtered[CTX_SZ_256];
-    int fcount = 0;
-    for (int i = 0; i < arr->count && fcount < CTX_SZ_256; i++) {
-        if (is_import_reachable(arr->items[i], import_vals, import_count)) {
-            filtered[fcount++] = arr->items[i];
-        }
-    }
+    int fcount = filter_import_reachable((const char **)arr->items, arr->count, import_vals,
+                                         import_count, filtered, CTX_SZ_256);
     if (fcount == SKIP_ONE) {
         double conf = candidate_count_penalty(CONF_SUFFIX_MATCH, arr->count);
         return (ctx_resolution_t){filtered[0], "suffix_match", conf, arr->count};
@@ -551,16 +675,7 @@ bool ctx_registry_admits_member_call(const ctx_registry_t *r, CtxLanguage lang,
 /* ── Fuzzy Resolve ──────────────────────────────────────────────── */
 
 /* Filter candidates by import reachability. Returns count of reachable. */
-static int filter_import_reachable(const char **candidates, int count, const char **import_vals,
-                                   int import_count, const char **out, int max_out) {
-    int n = 0;
-    for (int i = 0; i < count && n < max_out; i++) {
-        if (is_import_reachable(candidates[i], import_vals, import_count)) {
-            out[n++] = candidates[i];
-        }
-    }
-    return n;
-}
+
 
 ctx_fuzzy_result_t ctx_registry_fuzzy_resolve(const ctx_registry_t *r, const char *callee_name,
                                               const char *module_qn, const char **import_map_keys,

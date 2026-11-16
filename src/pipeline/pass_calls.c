@@ -98,31 +98,9 @@ static int build_import_map(ctx_pipeline_ctx_t *ctx, const char *rel_path,
     *out_vals = NULL;
     *out_count = 0;
 
-    /* Fast path: build from cached extraction result (no JSON parsing) */
+    /* Fast path: from the cached extraction result (no JSON parsing) */
     if (result && result->imports.count > 0) {
-        const char **keys = calloc((size_t)result->imports.count, sizeof(const char *));
-        const char **vals = calloc((size_t)result->imports.count, sizeof(const char *));
-        int count = 0;
-
-        for (int i = 0; i < result->imports.count; i++) {
-            const CtxImport *imp = &result->imports.items[i];
-            if (!imp->local_name || !imp->local_name[0] || !imp->module_path) {
-                continue;
-            }
-            char *target_qn = ctx_pipeline_fqn_module(ctx->project_name, imp->module_path);
-            const ctx_gbuf_node_t *target = ctx_gbuf_find_by_qn(ctx->gbuf, target_qn);
-            free(target_qn);
-            if (!target) {
-                continue;
-            }
-            keys[count] = strdup(imp->local_name);
-            vals[count] = target->qualified_name; /* borrowed from gbuf */
-            count++;
-        }
-
-        *out_keys = keys;
-        *out_vals = vals;
-        *out_count = count;
+        ctx_pipeline_import_map_from_result(ctx, rel_path, result, out_keys, out_vals, out_count);
         return 0;
     }
 
