@@ -126,6 +126,22 @@ static const char *best_by_import_distance(const char **candidates, int count,
 
 /* Check if candidate's module prefix appears in import map values.
  * Uses stack buffer to avoid malloc/free per call in hot resolution loop. */
+/* The scope an import value stands for. An index module (`ui.index`, a
+ * barrel) stands for its directory, the package; the definitions in the index
+ * file are qualified by the directory too (`ui.Button` for a Button declared in
+ * ui/index.ts). Any other value is its own scope. Returns val or buf. */
+static const char *import_scope(const char *val, char *buf, size_t size) {
+    static const char index_seg[] = ".index";
+    size_t seg_len = sizeof(index_seg) - SKIP_ONE;
+    size_t len = strlen(val);
+    if (len <= seg_len || strcmp(val + len - seg_len, index_seg) != 0 || len - seg_len >= size) {
+        return val;
+    }
+    memcpy(buf, val, len - seg_len);
+    buf[len - seg_len] = '\0';
+    return buf;
+}
+
 static bool is_import_reachable(const char *candidate_qn, const char **import_vals,
                                 int import_count) {
     char cand_mod[CTX_SZ_512];
@@ -141,7 +157,9 @@ static bool is_import_reachable(const char *candidate_qn, const char **import_va
         snprintf(cand_mod, sizeof(cand_mod), "%s", candidate_qn);
     }
     for (int i = 0; i < import_count; i++) {
-        if (strstr(cand_mod, import_vals[i]) || strstr(import_vals[i], cand_mod)) {
+        char scope_buf[CTX_SZ_512];
+        const char *scope = import_scope(import_vals[i], scope_buf, sizeof(scope_buf));
+        if (strstr(cand_mod, scope) || strstr(scope, cand_mod)) {
             return true;
         }
     }
@@ -365,20 +383,25 @@ static ctx_resolution_t resolve_import_map(const ctx_registry_t *r, const char *
      * first, then the module reading: the imported name inside the module.
      *
      * The bare `resolved` hit is for suffix-less callees only. For `f.get()`
-     * the callee is a member of f, never f itself. */
+     * the callee is a member of f, never f itself. The module reading is
+     * tried against the module's scope too: a name declared in a barrel's own
+     * index file is qualified by the directory. */
+    char scope[CTX_SZ_512];
+    const char *scope_qn = import_scope(resolved, scope, sizeof(scope));
+    const char *bases[] = {resolved, scope_qn};
+    int base_count = scope_qn == resolved ? 1 : 2;
     char candidate[CTX_SZ_512];
-    const char *stored_key = NULL;
-    if (suffix && suffix[0]) {
-        snprintf(candidate, sizeof(candidate), "%s.%s", resolved, suffix);
-        stored_key = ctx_ht_get_key(r->exact, candidate);
-        if (!stored_key) {
-            snprintf(candidate, sizeof(candidate), "%s.%s.%s", resolved, prefix, suffix);
+    const char *stored_key = suffix && suffix[0] ? NULL : ctx_ht_get_key(r->exact, resolved);
+    for (int b = 0; b < base_count && !stored_key; b++) {
+        if (suffix && suffix[0]) {
+            snprintf(candidate, sizeof(candidate), "%s.%s", bases[b], suffix);
             stored_key = ctx_ht_get_key(r->exact, candidate);
-        }
-    } else {
-        stored_key = ctx_ht_get_key(r->exact, resolved);
-        if (!stored_key) {
-            snprintf(candidate, sizeof(candidate), "%s.%s", resolved, prefix);
+            if (!stored_key) {
+                snprintf(candidate, sizeof(candidate), "%s.%s.%s", bases[b], prefix, suffix);
+                stored_key = ctx_ht_get_key(r->exact, candidate);
+            }
+        } else {
+            snprintf(candidate, sizeof(candidate), "%s.%s", bases[b], prefix);
             stored_key = ctx_ht_get_key(r->exact, candidate);
         }
     }
@@ -392,24 +415,16 @@ static ctx_resolution_t resolve_import_map(const ctx_registry_t *r, const char *
      * re-exports; its scope is its directory, the package. A member call
      * tries the imported name as its owner first (`Panel.open` → Panel's
      * open), then the member alone (`ns.format` on a namespace import). */
-    char scope[CTX_SZ_512];
-    snprintf(scope, sizeof(scope), "%s", resolved);
-    size_t scope_len = strlen(scope);
-    static const char index_seg[] = ".index";
-    if (scope_len > sizeof(index_seg) - SKIP_ONE &&
-        strcmp(scope + scope_len - (sizeof(index_seg) - SKIP_ONE), index_seg) == 0) {
-        scope[scope_len - (sizeof(index_seg) - SKIP_ONE)] = '\0';
-    }
     int matches = 0;
     const char *found = NULL;
     if (suffix && suffix[0]) {
         snprintf(candidate, sizeof(candidate), "%s.%s", prefix, suffix);
-        found = lookup_in_scope(r, scope, candidate, false, &matches);
+        found = lookup_in_scope(r, scope_qn, candidate, false, &matches);
         if (!found) {
-            found = lookup_in_scope(r, scope, suffix, false, &matches);
+            found = lookup_in_scope(r, scope_qn, suffix, false, &matches);
         }
     } else {
-        found = lookup_in_scope(r, scope, prefix, true, &matches);
+        found = lookup_in_scope(r, scope_qn, prefix, true, &matches);
     }
     if (found) {
         /* One match is what the import names. Several make the pick a

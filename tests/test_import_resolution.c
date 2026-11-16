@@ -159,6 +159,28 @@ static int setup_import_repo(void) {
          * package's own, the deeper one an internal helper. */
         {"ui/format.ts", "export function format(): void {}\n"},
         {"ui/internal/deep/format.ts", "export function format(): void {}\n"},
+        /* A component defined in its directory's index file. */
+        {"kit/label/index.ts", "export function Label(): void {}\n"},
+        {"screens/label_user.ts", "import { Label } from '../kit/label';\n"
+                                  "\n"
+                                  "export function rendersLabel(): void {\n"
+                                  "  Label();\n"
+                                  "}\n"},
+        /* Two classes with a same-named method; the caller imports one of
+         * them, through its package barrel, and sits beside the other. */
+        {"board/index.ts", "export * from './actions';\n"},
+        {"board/actions.ts", "export class BoardActions {\n"
+                             "  reset(): void {}\n"
+                             "}\n"
+                             "export const boardActions = new BoardActions();\n"},
+        {"other/actions.ts", "export class OtherActions {\n"
+                             "  reset(): void {}\n"
+                             "}\n"},
+        {"other/board_user.ts", "import { boardActions } from '../board';\n"
+                                "\n"
+                                "export function resetsBoard(): void {\n"
+                                "  boardActions.reset();\n"
+                                "}\n"},
         /* A package exporting an instance (`toast`, no definition of its own)
          * beside a class that happens to have a member of the called name. */
         {"kit/index.ts", "export * from './sheet';\n"},
@@ -600,6 +622,24 @@ TEST(barrel_import_with_two_candidates_is_not_high_confidence) {
 /* `toast.show()` on a name the package defines nothing for: the import says
  * where `toast` comes from, not which `show` runs. Another class's member of
  * that name is a guess and must not be labelled as resolved by the import. */
+/* A definition in the index file itself is what a directory import names:
+ * definitions there are qualified by the directory, not by `index`. */
+TEST(definition_in_the_index_file_is_a_direct_import_hit) {
+    BOTH_MODES(pf_call_resolved_by(g_seq, "rendersLabel", "kit.label.Label", "import_map"),
+               pf_call_resolved_by(g_par, "rendersLabel", "kit.label.Label", "import_map"));
+    PASS();
+}
+
+/* When the import cannot name the method, the guess among same-named methods
+ * still prefers the package the caller imported, barrel or not. */
+TEST(barrel_import_makes_its_package_reachable_for_a_guess) {
+    BOTH_MODES(pf_find_call(g_seq, "resetsBoard", "board.actions.BoardActions.reset"),
+               pf_find_call(g_par, "resetsBoard", "board.actions.BoardActions.reset"));
+    BOTH_MODES(!pf_find_call(g_seq, "resetsBoard", "other.actions.OtherActions.reset"),
+               !pf_find_call(g_par, "resetsBoard", "other.actions.OtherActions.reset"));
+    PASS();
+}
+
 /* A namespace import of a barrel reaches the package's top-level functions. */
 TEST(namespace_import_of_barrel_resolves_member_function) {
     BOTH_MODES(pf_call_resolved_by(g_seq, "hidesAll", "kit.sheet.hideAll", "import_map_suffix"),
@@ -668,6 +708,8 @@ SUITE(import_resolution) {
     RUN_TEST(barrel_import_member_is_the_named_class_member);
     RUN_TEST(barrel_import_with_two_candidates_prefers_the_shallower);
     RUN_TEST(barrel_import_with_two_candidates_is_not_high_confidence);
+    RUN_TEST(definition_in_the_index_file_is_a_direct_import_hit);
+    RUN_TEST(barrel_import_makes_its_package_reachable_for_a_guess);
     RUN_TEST(namespace_import_of_barrel_resolves_member_function);
     RUN_TEST(barrel_member_call_does_not_claim_another_owners_method);
     RUN_TEST(member_call_on_imported_name_is_not_the_name_itself);
