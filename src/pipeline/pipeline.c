@@ -105,6 +105,7 @@ struct ctx_pipeline {
     /* Indexing state (set during run) */
     ctx_gbuf_t *gbuf;
     ctx_registry_t *registry;
+    ctx_path_aliases_t *path_aliases; /* tsconfig aliases for this run, or NULL */
 
     /* User-defined extension overrides (loaded once per run) */
     ctx_userconfig_t *userconfig;
@@ -960,6 +961,7 @@ int ctx_pipeline_run(ctx_pipeline_t *p) {
     p->registry = ctx_registry_new();
 
     /* Build shared context for pass functions */
+    p->path_aliases = ctx_path_aliases_load(p->repo_path);
     ctx_pipeline_ctx_t ctx = {
         .project_name = p->project_name,
         .repo_path = p->repo_path,
@@ -967,6 +969,7 @@ int ctx_pipeline_run(ctx_pipeline_t *p) {
         .registry = p->registry,
         .cancelled = &p->cancelled,
         .mode = (int)p->mode,
+        .path_aliases = p->path_aliases,
     };
 
     rc = run_extraction_phase(p, &ctx, files, file_count);
@@ -992,6 +995,8 @@ cleanup:
     p->gbuf = NULL;
     ctx_registry_free(p->registry);
     p->registry = NULL;
+    ctx_path_aliases_free(p->path_aliases);
+    p->path_aliases = NULL;
     /* Clear and free user extension config */
     ctx_set_user_lang_config(NULL);
     ctx_userconfig_free(p->userconfig);

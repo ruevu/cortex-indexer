@@ -9,6 +9,7 @@
 #define CTX_PIPELINE_INTERNAL_H
 
 #include "pipeline/pipeline.h"
+#include "pipeline/path_alias.h"
 #include "graph_buffer/graph_buffer.h"
 #include "discover/discover.h"
 #include "foundation/hash_table.h"
@@ -46,7 +47,37 @@ typedef struct {
      * and pass_calls/usages/semantic reuse cached results instead of re-extracting.
      * Indexed by file position in the files[] array. Owned by pipeline.c. */
     CtxFileResult **result_cache;
+
+    /* tsconfig / jsconfig path aliases, or NULL when the repo has none.
+     * Loaded once per run (ctx_path_aliases_load); owned by the pipeline. */
+    const ctx_path_aliases_t *path_aliases;
 } ctx_pipeline_ctx_t;
+
+/* The graph node an import specifier names, seen from the file at
+ * source_rel, or NULL. Candidates, the first that names a node wins:
+ *   - a relative specifier (./x, ../x, Python's .x) against that file, alone;
+ *   - the targets of the file's tsconfig `paths`, then its baseUrl;
+ *   - the specifier read as a repo path.
+ * The one mapping every import consumer uses, IMPORTS edges and the import
+ * map of every resolution pass, so no two can disagree about which module an
+ * import means. They used to: the sequential passes read relative specifiers
+ * as repo paths and missed every one, and nothing read tsconfig aliases
+ * (cortex-indexer T-fdya). */
+const ctx_gbuf_node_t *ctx_pipeline_import_target(const ctx_pipeline_ctx_t *ctx,
+                                                  const char *source_rel,
+                                                  const char *module_path);
+
+/* A file's import map, from its extraction result: one {local name, imported
+ * node's qualified name} pair per named import whose specifier names a node
+ * (ctx_pipeline_import_target). Keys are heap strings, values are borrowed
+ * from ctx->gbuf; the caller frees the keys and both arrays.
+ *
+ * Read from the extraction result, not back from IMPORTS edges: the graph
+ * keeps one IMPORTS edge per file and module, so `import { a, b } from './m'`
+ * leaves one edge, and a map read from edges keeps one of the two names. */
+void ctx_pipeline_import_map_from_result(const ctx_pipeline_ctx_t *ctx, const char *source_rel,
+                                         const CtxFileResult *result, const char ***out_keys,
+                                         const char ***out_vals, int *out_count);
 
 /* Check cancellation. Returns non-zero if cancelled. */
 static inline int ctx_pipeline_check_cancel(const ctx_pipeline_ctx_t *ctx) {

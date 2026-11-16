@@ -243,56 +243,6 @@ static void build_def_props(char *buf, size_t bufsize, const CtxDefinition *def)
     }
 }
 
-/* Build import map from graph buffer IMPORTS edges (read-only access to gbuf). */
-static int build_import_map(const ctx_gbuf_t *gbuf, const char *project_name, const char *rel_path,
-                            const char ***out_keys, const char ***out_vals, int *out_count) {
-    *out_keys = NULL;
-    *out_vals = NULL;
-    *out_count = 0;
-
-    char *file_qn = ctx_pipeline_fqn_file(project_name, rel_path);
-    const ctx_gbuf_node_t *file_node = ctx_gbuf_find_by_qn(gbuf, file_qn);
-    free(file_qn);
-    if (!file_node) {
-        return 0;
-    }
-
-    const ctx_gbuf_edge_t **edges = NULL;
-    int edge_count = 0;
-    int rc =
-        ctx_gbuf_find_edges_by_source_type(gbuf, file_node->id, "IMPORTS", &edges, &edge_count);
-    if (rc != 0 || edge_count == 0) {
-        return 0;
-    }
-
-    const char **keys = calloc(edge_count, sizeof(const char *));
-    const char **vals = calloc(edge_count, sizeof(const char *));
-    int count = 0;
-
-    for (int i = 0; i < edge_count; i++) {
-        const ctx_gbuf_edge_t *e = edges[i];
-        const ctx_gbuf_node_t *target = ctx_gbuf_find_by_id(gbuf, e->target_id);
-        if (!target || !e->properties_json) {
-            continue;
-        }
-        const char *start = strstr(e->properties_json, "\"local_name\":\"");
-        if (start) {
-            start += strlen("\"local_name\":\"");
-            const char *end = strchr(start, '"');
-            if (end && end > start) {
-                keys[count] = ctx_strndup(start, end - start);
-                vals[count] = target->qualified_name;
-                count++;
-            }
-        }
-    }
-
-    *out_keys = keys;
-    *out_vals = vals;
-    *out_count = count;
-    return 0;
-}
-
 static void free_import_map(const char **keys, const char **vals, int count) {
     if (keys) {
         for (int i = 0; i < count; i++) {
@@ -743,8 +693,7 @@ static int create_imports_edges(ctx_pipeline_ctx_t *ctx, const CtxFileResult *re
         if (!imp->module_path) {
             continue;
         }
-        char *target_qn = ctx_pipeline_import_module_qn(ctx->project_name, rel, imp->module_path);
-        const ctx_gbuf_node_t *target = ctx_gbuf_find_by_qn(ctx->gbuf, target_qn);
+        const ctx_gbuf_node_t *target = ctx_pipeline_import_target(ctx, rel, imp->module_path);
         char *file_qn = ctx_pipeline_fqn_file(ctx->project_name, rel);
         const ctx_gbuf_node_t *source_node = ctx_gbuf_find_by_qn(ctx->gbuf, file_qn);
         if (source_node && target) {
@@ -755,7 +704,6 @@ static int create_imports_edges(ctx_pipeline_ctx_t *ctx, const CtxFileResult *re
             ctx_gbuf_insert_edge(ctx->gbuf, source_node->id, target->id, "IMPORTS", imp_props);
             count++;
         }
-        free(target_qn);
         free(file_qn);
     }
     return count;
@@ -860,6 +808,9 @@ typedef struct {
     int max_workers;
 
     CtxFileResult **result_cache;
+    /* READ-ONLY during Phase 4: import targets are looked up through it, in
+     * main_gbuf and the path aliases. */
+    const ctx_pipeline_ctx_t *pipeline_ctx;
     const ctx_gbuf_t *main_gbuf;    /* READ-ONLY during Phase 4 */
     const ctx_registry_t *registry; /* READ-ONLY during Phase 4 */
     _Atomic int64_t *shared_ids;
@@ -1526,7 +1477,8 @@ static void resolve_worker(int worker_id, void *ctx_ptr) {
         const char **imp_keys = NULL;
         const char **imp_vals = NULL;
         int imp_count = 0;
-        build_import_map(rc->main_gbuf, rc->project_name, rel, &imp_keys, &imp_vals, &imp_count);
+        ctx_pipeline_import_map_from_result(rc->pipeline_ctx, rel, result, &imp_keys, &imp_vals,
+                                            &imp_count);
 
         char *module_qn = ctx_pipeline_fqn_module(rc->project_name, rel);
 
@@ -1576,6 +1528,7 @@ int ctx_parallel_resolve(ctx_pipeline_ctx_t *ctx, const ctx_file_info_t *files, 
         .workers = workers,
         .max_workers = worker_count,
         .result_cache = result_cache,
+        .pipeline_ctx = ctx,
         .main_gbuf = ctx->gbuf,
         .registry = ctx->registry,
         .shared_ids = shared_ids,

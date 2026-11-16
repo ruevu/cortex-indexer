@@ -120,17 +120,6 @@ char *ctx_pipeline_fqn_folder(const char *project, const char *rel_dir);
  * dot-only segments used by Python relative imports. */
 char *ctx_pipeline_resolve_relative_import(const char *source_rel, const char *module_path);
 
-/* Module QN an import specifier names, seen from the importing file at
- * source_rel: a relative specifier resolves against that file, anything else
- * is read as a repo path. Caller must free().
- *
- * The one mapping every import consumer uses, IMPORTS edges and the import map
- * of every resolution pass, so no two of them can disagree about which module
- * an import means. They used to: the sequential passes read relative
- * specifiers as repo paths and missed every one (cortex-indexer T-fdya). */
-char *ctx_pipeline_import_module_qn(const char *project, const char *source_rel,
-                                    const char *module_path);
-
 /* Derive project name from an absolute path.
  * Replaces / and : with -, collapses --, trims leading -.
  * Caller must free() the returned string. */

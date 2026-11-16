@@ -343,8 +343,7 @@ static int create_import_edges_for_file(ctx_pipeline_ctx_t *ctx, const CtxFileRe
         if (!imp->module_path) {
             continue;
         }
-        char *target_qn = ctx_pipeline_import_module_qn(ctx->project_name, rel, imp->module_path);
-        const ctx_gbuf_node_t *target = ctx_gbuf_find_by_qn(ctx->gbuf, target_qn);
+        const ctx_gbuf_node_t *target = ctx_pipeline_import_target(ctx, rel, imp->module_path);
         char *file_qn = ctx_pipeline_fqn_file(ctx->project_name, rel);
         const ctx_gbuf_node_t *source_node = ctx_gbuf_find_by_qn(ctx->gbuf, file_qn);
         if (source_node && target) {
@@ -354,7 +353,6 @@ static int create_import_edges_for_file(ctx_pipeline_ctx_t *ctx, const CtxFileRe
             ctx_gbuf_insert_edge(ctx->gbuf, source_node->id, target->id, "IMPORTS", imp_props);
             count++;
         }
-        free(target_qn);
         free(file_qn);
     }
     return count;

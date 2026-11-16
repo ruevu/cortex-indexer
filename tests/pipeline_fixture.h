@@ -45,6 +45,7 @@ static inline ctx_gbuf_t *pf_run_sequential(const char *project, const char *rep
     atomic_int cancelled;
     atomic_init(&cancelled, 0);
     CtxFileResult **cache = calloc(file_count, sizeof(CtxFileResult *));
+    ctx_path_aliases_t *aliases = ctx_path_aliases_load(repo);
     ctx_pipeline_ctx_t ctx = {
         .project_name = project,
         .repo_path = repo,
@@ -52,6 +53,7 @@ static inline ctx_gbuf_t *pf_run_sequential(const char *project, const char *rep
         .registry = reg,
         .cancelled = &cancelled,
         .result_cache = cache,
+        .path_aliases = aliases,
     };
     ctx_init();
     ctx_pipeline_pass_definitions(&ctx, files, file_count);
@@ -65,6 +67,7 @@ static inline ctx_gbuf_t *pf_run_sequential(const char *project, const char *rep
     }
     free(cache);
     ctx_registry_free(reg);
+    ctx_path_aliases_free(aliases);
     return gbuf;
 }
 
@@ -77,12 +80,14 @@ static inline ctx_gbuf_t *pf_run_parallel(const char *project, const char *repo,
     ctx_registry_t *reg = ctx_registry_new();
     atomic_int cancelled;
     atomic_init(&cancelled, 0);
+    ctx_path_aliases_t *aliases = ctx_path_aliases_load(repo);
     ctx_pipeline_ctx_t ctx = {
         .project_name = project,
         .repo_path = repo,
         .gbuf = gbuf,
         .registry = reg,
         .cancelled = &cancelled,
+        .path_aliases = aliases,
     };
     _Atomic int64_t shared_ids;
     atomic_init(&shared_ids, ctx_gbuf_next_id(gbuf));
@@ -100,6 +105,7 @@ static inline ctx_gbuf_t *pf_run_parallel(const char *project, const char *repo,
     }
     free(cache);
     ctx_registry_free(reg);
+    ctx_path_aliases_free(aliases);
     return gbuf;
 }
 

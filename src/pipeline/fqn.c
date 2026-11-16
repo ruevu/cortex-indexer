@@ -316,15 +316,6 @@ char *ctx_pipeline_resolve_relative_import(const char *source_rel, const char *m
     return resolve_js_relative(buf, sizeof(buf), module_path);
 }
 
-char *ctx_pipeline_import_module_qn(const char *project, const char *source_rel,
-                                    const char *module_path) {
-    char *resolved =
-        source_rel ? ctx_pipeline_resolve_relative_import(source_rel, module_path) : NULL;
-    char *qn = ctx_pipeline_fqn_module(project, resolved ? resolved : module_path);
-    free(resolved);
-    return qn;
-}
-
 char *ctx_pipeline_fqn_folder(const char *project, const char *rel_dir) {
     if (!project) {
         return strdup("");

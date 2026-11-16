@@ -269,27 +269,61 @@ int ctx_registry_size(const ctx_registry_t *r) {
 
 /* ── Resolution ──────────────────────────────────────────────────── */
 
-/* Callback context for import_map_suffix scan */
-struct ims_ctx {
-    const char *resolved_dot; /* "proj.other." */
-    size_t resolved_dot_len;
-    const char *dot_suffix; /* ".Foo" */
-    size_t dot_suffix_len;
-    const char *found_key;
-};
+static int qn_depth(const char *qn) {
+    int depth = 0;
+    for (; *qn; qn++) {
+        depth += *qn == '.';
+    }
+    return depth;
+}
 
-static void ims_scan(const char *key, void *value, void *ud) {
-    (void)value;
-    struct ims_ctx *ctx = ud;
-    if (ctx->found_key) {
-        return; /* already found */
+/* The registered definition under `scope` (a QN prefix, matched up to a
+ * segment boundary) whose QN ends with the whole segments `tail`
+ * ("format", or "Panel.open"). Found through the by-name index, keyed by
+ * tail's last segment, so it costs one bucket, not a registry scan.
+ *
+ * This is how an import reaches a barrel: `import { Button } from './ui'`
+ * names the module ui/index.ts, which defines nothing it re-exports, so the
+ * definition is looked for anywhere inside the package instead.
+ *
+ * bare: a bare call reaches a Function or a Class, never a Method.
+ * Several matches: the shallowest QN (nearest the package's root), then the
+ * lexicographically smallest, so the answer never depends on hash order.
+ * *matches is set to how many qualified. */
+static const char *lookup_in_scope(const ctx_registry_t *r, const char *scope, const char *tail,
+                                   bool bare, int *matches) {
+    *matches = 0;
+    const char *last_dot = strrchr(tail, '.');
+    qn_array_t *arr = ctx_ht_get(r->by_name, last_dot ? last_dot + SKIP_ONE : tail);
+    if (!arr) {
+        return NULL;
     }
-    size_t klen = strlen(key);
-    if (klen >= ctx->resolved_dot_len + ctx->dot_suffix_len &&
-        strncmp(key, ctx->resolved_dot, ctx->resolved_dot_len) == 0 &&
-        strcmp(key + klen - ctx->dot_suffix_len, ctx->dot_suffix) == 0) {
-        ctx->found_key = key;
+    size_t scope_len = strlen(scope);
+    size_t tail_len = strlen(tail);
+    const char *best = NULL;
+    int best_depth = 0;
+    for (int i = 0; i < arr->count; i++) {
+        const char *qn = arr->items[i];
+        size_t len = strlen(qn);
+        if (len < scope_len + SKIP_ONE + tail_len || strncmp(qn, scope, scope_len) != 0 ||
+            qn[scope_len] != '.' || strcmp(qn + len - tail_len, tail) != 0 ||
+            qn[len - tail_len - SKIP_ONE] != '.') {
+            continue;
+        }
+        if (bare) {
+            const char *label = ctx_ht_get(r->exact, qn);
+            if (!label || (strcmp(label, "Function") != 0 && strcmp(label, "Class") != 0)) {
+                continue;
+            }
+        }
+        (*matches)++;
+        int depth = qn_depth(qn);
+        if (!best || depth < best_depth || (depth == best_depth && strcmp(qn, best) < 0)) {
+            best = qn;
+            best_depth = depth;
+        }
     }
+    return best ? ctx_ht_get_key(r->exact, best) : NULL;
 }
 
 /* Strategy 1: Import map lookup (exact → suffix fallback) */
@@ -340,25 +374,34 @@ static ctx_resolution_t resolve_import_map(const ctx_registry_t *r, const char *
         return (ctx_resolution_t){stored_key, "import_map", CONF_IMPORT_MAP, REG_RESOLVED};
     }
 
-    /* import_map_suffix fallback: scan for QNs starting with resolved+"."
-     * and ending with "."+suffix */
+    /* import_map_suffix: no exact hit, so look inside the imported module's
+     * scope. A barrel (ui/index.ts, module `ui.index`) defines nothing it
+     * re-exports; its scope is its directory, the package. A member call
+     * tries the imported name as its owner first (`Panel.open` → Panel's
+     * open), then the member alone (`ns.format` on a namespace import). */
+    char scope[CTX_SZ_512];
+    snprintf(scope, sizeof(scope), "%s", resolved);
+    size_t scope_len = strlen(scope);
+    static const char index_seg[] = ".index";
+    if (scope_len > sizeof(index_seg) - SKIP_ONE &&
+        strcmp(scope + scope_len - (sizeof(index_seg) - SKIP_ONE), index_seg) == 0) {
+        scope[scope_len - (sizeof(index_seg) - SKIP_ONE)] = '\0';
+    }
+    int matches = 0;
+    const char *found = NULL;
     if (suffix && suffix[0]) {
-        char resolved_dot[CTX_SZ_512];
-        char dot_suffix[CTX_SZ_256];
-        snprintf(resolved_dot, sizeof(resolved_dot), "%s.", resolved);
-        snprintf(dot_suffix, sizeof(dot_suffix), ".%s", suffix);
-        struct ims_ctx ctx = {
-            .resolved_dot = resolved_dot,
-            .resolved_dot_len = strlen(resolved_dot),
-            .dot_suffix = dot_suffix,
-            .dot_suffix_len = strlen(dot_suffix),
-            .found_key = NULL,
-        };
-        ctx_ht_foreach(r->exact, ims_scan, &ctx);
-        if (ctx.found_key) {
-            return (ctx_resolution_t){ctx.found_key, "import_map_suffix", CONF_IMPORT_MAP_SUFFIX,
-                                      REG_RESOLVED};
+        snprintf(candidate, sizeof(candidate), "%s.%s", prefix, suffix);
+        found = lookup_in_scope(r, scope, candidate, false, &matches);
+        if (!found) {
+            found = lookup_in_scope(r, scope, suffix, false, &matches);
         }
+    } else {
+        found = lookup_in_scope(r, scope, prefix, true, &matches);
+    }
+    if (found) {
+        return (ctx_resolution_t){found, "import_map_suffix",
+                                  candidate_count_penalty(CONF_IMPORT_MAP_SUFFIX, matches),
+                                  matches};
     }
     return empty_result();
 }

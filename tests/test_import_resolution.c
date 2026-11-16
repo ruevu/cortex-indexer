@@ -21,10 +21,11 @@
 #include <stdio.h>
 
 static char g_ir_tmpdir[256];
+static char g_alias_tmpdir[256];
 
-static int ir_write(const char *rel, const char *content) {
+static int ir_write_in(const char *root, const char *rel, const char *content) {
     char path[512];
-    snprintf(path, sizeof(path), "%s/%s", g_ir_tmpdir, rel);
+    snprintf(path, sizeof(path), "%s/%s", root, rel);
     char *slash = strrchr(path, '/');
     if (slash) {
         *slash = '\0';
@@ -32,6 +33,10 @@ static int ir_write(const char *rel, const char *content) {
         *slash = '/';
     }
     return th_write_file(path, content);
+}
+
+static int ir_write(const char *rel, const char *content) {
+    return ir_write_in(g_ir_tmpdir, rel, content);
 }
 
 static int setup_import_repo(void) {
@@ -43,11 +48,34 @@ static int setup_import_repo(void) {
         /* The function every caller means. */
         {"util/date.ts", "export function formatDate(d: string): string {\n"
                          "  return d;\n"
+                         "}\n"
+                         "export function parseDate(d: string): string {\n"
+                         "  return d;\n"
                          "}\n"},
         /* A same-named function beside the relative importer: nearest by path,
          * but not what it imports. */
         {"feature/date.ts", "export function formatDate(d: string): string {\n"
                             "  return d + '!';\n"
+                            "}\n"
+                            "export function parseDate(d: string): string {\n"
+                            "  return d + '!';\n"
+                            "}\n"},
+        /* A dotted file name, the Nx / Angular habit: `.mapper` is part of the
+         * name, not an extension, and the sibling tag.ts is not what the
+         * import names. */
+        {"util/tag.mapper.ts", "export function mapTag(): void {}\n"},
+        {"util/tag.ts", "export function mapTag(): void {}\n"},
+        {"feature/tags.ts", "import { mapTag } from '../util/tag.mapper';\n"
+                            "\n"
+                            "export function usesMapper(): void {\n"
+                            "  mapTag();\n"
+                            "}\n"},
+        /* Two names from one module: one import statement, one module, so one
+         * IMPORTS edge in the graph, but two names in the import map. */
+        {"feature/both.ts", "import { formatDate, parseDate } from '../util/date';\n"
+                            "\n"
+                            "export function usesBoth(): string {\n"
+                            "  return formatDate(parseDate('z'));\n"
                             "}\n"},
         /* Python maps an imported name to the symbol itself (util.client.client),
          * so this is where a member call could collapse onto the name. */
@@ -106,6 +134,40 @@ static int setup_import_repo(void) {
                                 "@register\n"
                                 "def handle():\n"
                                 "    pass\n"},
+        /* A barrel: ui/index.ts re-exports what the package's files define.
+         * An import of the barrel names module `ui`, where none of these
+         * symbols is defined. */
+        {"ui/index.ts", "export * from './button';\n"
+                        "export * from './panel';\n"
+                        "export * from './format';\n"},
+        {"ui/button.ts", "export function Button(): void {}\n"},
+        {"ui/panel.ts", "export class Panel {\n"
+                        "  static open(): void {}\n"
+                        "}\n"
+                        "export class Drawer {\n"
+                        "  static open(): void {}\n"
+                        "}\n"},
+        /* Two `format`s inside the package: the shallower one is the
+         * package's own, the deeper one an internal helper. */
+        {"ui/format.ts", "export function format(): void {}\n"},
+        {"ui/internal/deep/format.ts", "export function format(): void {}\n"},
+        /* Same-named definitions beside the importer: nearest by path, but
+         * outside the imported package. */
+        {"screens/button.ts", "export function Button(): void {}\n"},
+        {"screens/format.ts", "export function format(): void {}\n"},
+        {"screens/home.ts", "import { Button, Panel, format } from '../ui';\n"
+                            "\n"
+                            "export function rendersButton(): void {\n"
+                            "  Button();\n"
+                            "}\n"
+                            "\n"
+                            "export function opensPanel(): void {\n"
+                            "  Panel.open();\n"
+                            "}\n"
+                            "\n"
+                            "export function formatsHome(): void {\n"
+                            "  format();\n"
+                            "}\n"},
     };
     for (size_t i = 0; i < sizeof(files) / sizeof(files[0]); i++) {
         if (ir_write(files[i][0], files[i][1]) != 0) {
@@ -151,6 +213,188 @@ static int ensure_import_graphs(void) {
         ASSERT_TRUE(expr_par);                                                                     \
     } while (0)
 
+/* ── tsconfig path aliases ───────────────────────────────────────── */
+
+/* A workspace laid out the way Nx lays one out: the aliases live in a root
+ * tsconfig.base.json, which no tool reads on its own; each project's
+ * tsconfig.json reaches it through `extends`. */
+static int setup_alias_repo(void) {
+    snprintf(g_alias_tmpdir, sizeof(g_alias_tmpdir), "/tmp/ctx_alias_XXXXXX");
+    if (!ctx_mkdtemp(g_alias_tmpdir)) {
+        return -1;
+    }
+    const char *const files[][2] = {
+        /* Comments and a trailing comma: tsconfig is JSONC. */
+        {"tsconfig.base.json", "{\n"
+                               "  // shared by every project\n"
+                               "  \"compilerOptions\": {\n"
+                               "    \"baseUrl\": \".\",\n"
+                               "    \"paths\": {\n"
+                               "      \"@acme/ui\": [\"libs/ui/src/index.ts\"],\n"
+                               "      \"@acme/util/*\": [\"libs/util/src/lib/*\"],\n"
+                               "    },\n"
+                               "  },\n"
+                               "}\n"},
+        {"libs/ui/tsconfig.json", "{ \"extends\": \"../../tsconfig.base.json\" }\n"},
+        {"libs/ui/src/index.ts", "export * from './lib/button';\n"},
+        {"libs/ui/src/lib/button.ts", "export function Button(): void {}\n"},
+        /* Two hops, the middle one named without its .json. */
+        {"libs/tsconfig.libs.json", "{ \"extends\": \"../tsconfig.base.json\" }\n"},
+        {"libs/util/tsconfig.json", "{ \"extends\": \"../tsconfig.libs\" }\n"},
+        {"libs/util/src/lib/date.ts", "export function formatDate(): void {}\n"},
+        {"libs/util/src/lib/button.ts", "export function Button(): void {}\n"},
+        {"libs/util/src/lib/decorate.ts", "import { Button } from '@acme/ui';\n"
+                                          "\n"
+                                          "export function decorate(): void {\n"
+                                          "  Button();\n"
+                                          "}\n"},
+        {"apps/shop/tsconfig.json", "{\n"
+                                    "  \"extends\": \"../../tsconfig.base.json\",\n"
+                                    "  \"compilerOptions\": { \"strict\": true }\n"
+                                    "}\n"},
+        {"apps/shop/src/button.ts", "export function Button(): void {}\n"},
+        {"apps/shop/src/date.ts", "export function formatDate(): void {}\n"},
+        {"apps/shop/src/main.ts", "import { Button } from '@acme/ui';\n"
+                                  "import { formatDate } from '@acme/util/date';\n"
+                                  "\n"
+                                  "export function render(): void {\n"
+                                  "  Button();\n"
+                                  "}\n"
+                                  "\n"
+                                  "export function stamp(): void {\n"
+                                  "  formatDate();\n"
+                                  "}\n"},
+        /* Its own paths and no baseUrl: they resolve against the inherited
+         * baseUrl (the repo root), not this file's directory. */
+        {"apps/admin/tsconfig.json", "{\n"
+                                     "  \"extends\": \"../../tsconfig.base.json\",\n"
+                                     "  \"compilerOptions\": {\n"
+                                     "    \"paths\": {\n"
+                                     "      \"@admin/*\": [\"apps/admin/src/features/*\"]\n"
+                                     "    }\n"
+                                     "  }\n"
+                                     "}\n"},
+        {"apps/admin/src/features/orders.ts", "export function listOrders(): void {}\n"},
+        {"apps/admin/src/orders.ts", "export function listOrders(): void {}\n"},
+        {"apps/admin/src/main.ts", "import { listOrders } from '@admin/orders';\n"
+                                   "\n"
+                                   "export function showOrders(): void {\n"
+                                   "  listOrders();\n"
+                                   "}\n"},
+        /* No extends; a baseUrl below the config, and a path relative to it. */
+        {"apps/legacy/tsconfig.json", "{\n"
+                                      "  \"compilerOptions\": {\n"
+                                      "    \"baseUrl\": \"src\",\n"
+                                      "    \"paths\": { \"~/*\": [\"*\"] }\n"
+                                      "  }\n"
+                                      "}\n"},
+        {"apps/legacy/src/helpers/text.ts", "export function slugify(): void {}\n"
+                                            "export function titleCase(): void {}\n"},
+        {"apps/legacy/src/text.ts", "export function slugify(): void {}\n"
+                                    "export function titleCase(): void {}\n"},
+        {"apps/legacy/src/main.ts", "import { slugify } from 'helpers/text';\n"
+                                    "import { titleCase } from '~/helpers/text';\n"
+                                    "\n"
+                                    "export function makeSlug(): void {\n"
+                                    "  slugify();\n"
+                                    "}\n"
+                                    "\n"
+                                    "export function makeTitle(): void {\n"
+                                    "  titleCase();\n"
+                                    "}\n"},
+    };
+    for (size_t i = 0; i < sizeof(files) / sizeof(files[0]); i++) {
+        if (ir_write_in(g_alias_tmpdir, files[i][0], files[i][1]) != 0) {
+            return -1;
+        }
+    }
+    return 0;
+}
+
+static ctx_gbuf_t *g_alias_seq = NULL;
+static ctx_gbuf_t *g_alias_par = NULL;
+static bool g_alias_ready = false;
+static bool g_alias_failed = false;
+
+static int ensure_alias_graphs(void) {
+    if (g_alias_ready) {
+        return 0;
+    }
+    if (g_alias_failed || setup_alias_repo() != 0) {
+        g_alias_failed = true;
+        return -1;
+    }
+    ctx_discover_opts_t opts = {.mode = CTX_MODE_FULL};
+    ctx_file_info_t *files = NULL;
+    int file_count = 0;
+    if (ctx_discover(g_alias_tmpdir, &opts, &files, &file_count) != 0) {
+        g_alias_failed = true;
+        return -1;
+    }
+    g_alias_seq = pf_run_sequential("alias-test", g_alias_tmpdir, files, file_count);
+    g_alias_par = pf_run_parallel("alias-test", g_alias_tmpdir, files, file_count);
+    ctx_discover_free(files, file_count);
+    g_alias_ready = true;
+    return 0;
+}
+
+#define ALIAS_BOTH_MODES(expr_seq, expr_par)                                                       \
+    do {                                                                                           \
+        if (ensure_alias_graphs() != 0) {                                                          \
+            SKIP("setup failed");                                                                  \
+        }                                                                                          \
+        ASSERT_TRUE(expr_seq);                                                                     \
+        ASSERT_TRUE(expr_par);                                                                     \
+    } while (0)
+
+/* An alias from an extended base config reaches the package's barrel, and
+ * the barrel's package holds the definition. */
+TEST(alias_from_extended_base_resolves_into_the_package) {
+    ALIAS_BOTH_MODES(pf_call_resolved_by(g_alias_seq, "render", "libs.ui.src.lib.button.Button",
+                                         "import_map_suffix"),
+                     pf_call_resolved_by(g_alias_par, "render", "libs.ui.src.lib.button.Button",
+                                         "import_map_suffix"));
+    ALIAS_BOTH_MODES(!pf_find_call(g_alias_seq, "render", "apps.shop.src.button.Button"),
+                     !pf_find_call(g_alias_par, "render", "apps.shop.src.button.Button"));
+    PASS();
+}
+
+TEST(wildcard_alias_resolves_to_the_module) {
+    ALIAS_BOTH_MODES(pf_call_resolved_by(g_alias_seq, "stamp", "libs.util.src.lib.date.formatDate",
+                                         "import_map"),
+                     pf_call_resolved_by(g_alias_par, "stamp", "libs.util.src.lib.date.formatDate",
+                                         "import_map"));
+    PASS();
+}
+
+/* libs/util/tsconfig.json → ../tsconfig.libs (no .json) → the base. */
+TEST(alias_through_two_extends_hops) {
+    ALIAS_BOTH_MODES(pf_call_resolved_by(g_alias_seq, "decorate", "libs.ui.src.lib.button.Button",
+                                         "import_map_suffix"),
+                     pf_call_resolved_by(g_alias_par, "decorate", "libs.ui.src.lib.button.Button",
+                                         "import_map_suffix"));
+    PASS();
+}
+
+TEST(child_paths_resolve_against_the_inherited_base_url) {
+    const char *orders = "apps.admin.src.features.orders.listOrders";
+    ALIAS_BOTH_MODES(pf_call_resolved_by(g_alias_seq, "showOrders", orders, "import_map"),
+                     pf_call_resolved_by(g_alias_par, "showOrders", orders, "import_map"));
+    PASS();
+}
+
+TEST(base_url_and_paths_relative_to_it) {
+    ALIAS_BOTH_MODES(pf_call_resolved_by(g_alias_seq, "makeSlug",
+                                         "apps.legacy.src.helpers.text.slugify", "import_map"),
+                     pf_call_resolved_by(g_alias_par, "makeSlug",
+                                         "apps.legacy.src.helpers.text.slugify", "import_map"));
+    ALIAS_BOTH_MODES(pf_call_resolved_by(g_alias_seq, "makeTitle",
+                                         "apps.legacy.src.helpers.text.titleCase", "import_map"),
+                     pf_call_resolved_by(g_alias_par, "makeTitle",
+                                         "apps.legacy.src.helpers.text.titleCase", "import_map"));
+    PASS();
+}
+
 TEST(bare_imported_call_resolves_through_import_map) {
     BOTH_MODES(pf_call_resolved_by(g_seq, "useRootImport", "util.date.formatDate", "import_map"),
                pf_call_resolved_by(g_par, "useRootImport", "util.date.formatDate", "import_map"));
@@ -176,6 +420,29 @@ TEST(relative_import_resolves_in_both_resolvers) {
     PASS();
 }
 
+/* Every name a file imports from a module is in its import map, not only the
+ * last: the graph keeps one IMPORTS edge per file and module, so a map read
+ * back from those edges loses the rest. */
+TEST(every_name_imported_from_one_module_resolves) {
+    BOTH_MODES(pf_call_resolved_by(g_seq, "usesBoth", "util.date.formatDate", "import_map"),
+               pf_call_resolved_by(g_par, "usesBoth", "util.date.formatDate", "import_map"));
+    BOTH_MODES(pf_call_resolved_by(g_seq, "usesBoth", "util.date.parseDate", "import_map"),
+               pf_call_resolved_by(g_par, "usesBoth", "util.date.parseDate", "import_map"));
+    BOTH_MODES(!pf_find_call(g_seq, "usesBoth", "feature.date.formatDate"),
+               !pf_find_call(g_par, "usesBoth", "feature.date.formatDate"));
+    PASS();
+}
+
+/* `../util/tag.mapper` names util/tag.mapper.ts: the last dot in a
+ * specifier is not always an extension's. */
+TEST(dotted_module_name_is_not_an_extension) {
+    BOTH_MODES(pf_call_resolved_by(g_seq, "usesMapper", "util.tag.mapper.mapTag", "import_map"),
+               pf_call_resolved_by(g_par, "usesMapper", "util.tag.mapper.mapTag", "import_map"));
+    BOTH_MODES(!pf_find_call(g_seq, "usesMapper", "util.tag.mapTag"),
+               !pf_find_call(g_par, "usesMapper", "util.tag.mapTag"));
+    PASS();
+}
+
 /* Every import consumer shares one specifier → module mapping, so a relative
  * import means the same module to the usages and semantic passes too. */
 TEST(relative_import_reference_is_a_usage_of_the_imported_function) {
@@ -192,6 +459,38 @@ TEST(relative_import_decorator_is_the_imported_one) {
                pf_find_edge(g_par, "handle", "DECORATES", "util.deco.register"));
     BOTH_MODES(!pf_find_edge(g_seq, "handle", "DECORATES", "feature.deco.register"),
                !pf_find_edge(g_par, "handle", "DECORATES", "feature.deco.register"));
+    PASS();
+}
+
+/* A name imported from a barrel resolves to its definition inside the
+ * imported package, never to a same-named one outside it. */
+TEST(barrel_import_resolves_inside_the_package) {
+    BOTH_MODES(
+        pf_call_resolved_by(g_seq, "rendersButton", "ui.button.Button", "import_map_suffix"),
+        pf_call_resolved_by(g_par, "rendersButton", "ui.button.Button", "import_map_suffix"));
+    BOTH_MODES(!pf_find_call(g_seq, "rendersButton", "screens.button.Button"),
+               !pf_find_call(g_par, "rendersButton", "screens.button.Button"));
+    PASS();
+}
+
+/* `Panel.open()` on a class imported from a barrel is Panel's `open`, not the
+ * first `open` a scan of the package happens to meet. */
+TEST(barrel_import_member_is_the_named_class_member) {
+    BOTH_MODES(
+        pf_call_resolved_by(g_seq, "opensPanel", "ui.panel.Panel.open", "import_map_suffix"),
+        pf_call_resolved_by(g_par, "opensPanel", "ui.panel.Panel.open", "import_map_suffix"));
+    BOTH_MODES(!pf_find_call(g_seq, "opensPanel", "ui.panel.Drawer.open"),
+               !pf_find_call(g_par, "opensPanel", "ui.panel.Drawer.open"));
+    PASS();
+}
+
+/* Two `format`s in the package: the choice is deterministic (the shallower
+ * one), and still never the one outside the package. */
+TEST(barrel_import_with_two_candidates_prefers_the_shallower) {
+    BOTH_MODES(pf_call_resolved_by(g_seq, "formatsHome", "ui.format.format", "import_map_suffix"),
+               pf_call_resolved_by(g_par, "formatsHome", "ui.format.format", "import_map_suffix"));
+    BOTH_MODES(!pf_find_call(g_seq, "formatsHome", "screens.format.format"),
+               !pf_find_call(g_par, "formatsHome", "screens.format.format"));
     PASS();
 }
 
@@ -219,14 +518,38 @@ static void import_resolution_teardown(void) {
     }
     g_ir_ready = false;
     g_ir_failed = false;
+    if (g_alias_seq) {
+        ctx_gbuf_free(g_alias_seq);
+        g_alias_seq = NULL;
+    }
+    if (g_alias_par) {
+        ctx_gbuf_free(g_alias_par);
+        g_alias_par = NULL;
+    }
+    if (g_alias_tmpdir[0]) {
+        th_rmtree(g_alias_tmpdir);
+        g_alias_tmpdir[0] = '\0';
+    }
+    g_alias_ready = false;
+    g_alias_failed = false;
 }
 
 SUITE(import_resolution) {
     RUN_TEST(bare_imported_call_resolves_through_import_map);
     RUN_TEST(member_of_imported_class_resolves_exactly);
     RUN_TEST(relative_import_resolves_in_both_resolvers);
+    RUN_TEST(every_name_imported_from_one_module_resolves);
+    RUN_TEST(dotted_module_name_is_not_an_extension);
     RUN_TEST(relative_import_reference_is_a_usage_of_the_imported_function);
     RUN_TEST(relative_import_decorator_is_the_imported_one);
+    RUN_TEST(barrel_import_resolves_inside_the_package);
+    RUN_TEST(barrel_import_member_is_the_named_class_member);
+    RUN_TEST(barrel_import_with_two_candidates_prefers_the_shallower);
     RUN_TEST(member_call_on_imported_name_is_not_the_name_itself);
+    RUN_TEST(alias_from_extended_base_resolves_into_the_package);
+    RUN_TEST(wildcard_alias_resolves_to_the_module);
+    RUN_TEST(alias_through_two_extends_hops);
+    RUN_TEST(child_paths_resolve_against_the_inherited_base_url);
+    RUN_TEST(base_url_and_paths_relative_to_it);
     import_resolution_teardown();
 }
