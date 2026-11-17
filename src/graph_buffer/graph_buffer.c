@@ -543,32 +543,74 @@ void ctx_gbuf_set_next_id(ctx_gbuf_t *gb, int64_t next_id) {
 
 /* ── Node operations ─────────────────────────────────────────────── */
 
-/* True when a claim from `incoming_file` must NOT take over a qualified name
- * already held by `holder`.
+/* JS/TS-family source extensions, in the order TypeScript's module resolution
+ * tries them for an extension-less specifier ("./Component"). */
+static const char *const IMPORTABLE_EXTS[] = {"ts",  "tsx", "js",  "jsx", "mts",
+                                              "cts", "mjs", "cjs", "vue", "svelte"};
+enum { IMPORTABLE_EXT_COUNT = sizeof(IMPORTABLE_EXTS) / sizeof(IMPORTABLE_EXTS[0]) };
+
+/* Where a claim stands when it collides on a qualified name: the position of
+ * its extension in IMPORTABLE_EXTS for a Module from a JS/TS-family file, or
+ * IMPORTABLE_EXT_COUNT for every other claim. Lower wins. */
+static int qn_claim_rank(const char *label, const char *file_path) {
+    if (!label || !file_path || strcmp(label, "Module") != 0) {
+        return IMPORTABLE_EXT_COUNT;
+    }
+    const char *slash = strrchr(file_path, '/');
+    const char *base = slash ? slash + 1 : file_path;
+    const char *dot = strrchr(base, '.');
+    if (!dot) {
+        return IMPORTABLE_EXT_COUNT;
+    }
+    for (int i = 0; i < IMPORTABLE_EXT_COUNT; i++) {
+        if (strcmp(dot + 1, IMPORTABLE_EXTS[i]) == 0) {
+            return i;
+        }
+    }
+    return IMPORTABLE_EXT_COUNT;
+}
+
+/* True when a claim (`incoming_label`, `incoming_file`) must NOT take over a
+ * qualified name already held by `holder`.
  *
- * Distinct files can still land on one qualified name: a module qn drops the
- * file extension, so Component.tsx and Component.css reduce to the same string.
- * The buffer is keyed by qualified name, so exactly one of them gets a node.
+ * Distinct claims can land on one qualified name, and the buffer is keyed by
+ * qualified name, so exactly one of them gets a node:
+ *   - a module qn drops the extension: Component.tsx and Component.css;
+ *   - a Folder's qn is the module qn of its path: store.ts and store/;
+ *   - a symbol qn is its module's qn plus its name: a `persister` declared in
+ *     worker.ts and the module worker/persister.ts.
  *
- * Last-write-wins used to pick the survivor, and under parallel extraction
- * "last" means whichever worker happened to finish first — files are dispatched
- * to workers dynamically, so the same tree indexed twice produced two different
- * graphs. Downstream that is not cosmetic: nodes carry the losing file's path,
- * so every consumer that rolls edges up to files (frame clustering, impact
- * analysis) reshuffles between runs over an unchanged repo.
+ * A module qn is the key extension-less import specifiers resolve against, so
+ * the survivor is the claim TypeScript's resolution would pick: a Module from
+ * a JS/TS-family file beats any other claim, a file before a directory and
+ * before a stylesheet, and two such modules go by TypeScript's extension
+ * order. Losing that module is not cosmetic: its definitions and every import
+ * of it would hang off a stylesheet, a folder, or a variable in another file.
  *
- * A total order on file_path fixes the survivor without needing to know the
- * arrival order: whichever path sorts first wins, from any interleaving. Which
- * file that is remains arbitrary — the qn is genuinely ambiguous — but it is
- * now a property of the repository instead of the thread schedule.
+ * Everything else falls back to a total order on file_path, which keeps the
+ * survivor a property of the repository rather than of the thread schedule:
+ * files reach workers dynamically, and last-write-wins once made the same tree
+ * index to two different graphs. That covers collisions without a JS/TS module
+ * on either side — a Go package is its directory, so a Folder beside a .go
+ * file keeps its old outcome.
  *
  * Equal paths are not a collision at all: that is one file's node being
  * enriched by a later pass, and must still update in place. */
-static bool qn_claim_loses(const ctx_gbuf_node_t *holder, const char *incoming_file) {
+static bool qn_claim_loses(const ctx_gbuf_node_t *holder, const char *incoming_label,
+                           const char *incoming_file) {
     if (!holder->file_path || !incoming_file) {
         return false;
     }
-    return strcmp(holder->file_path, incoming_file) < 0;
+    int by_path = strcmp(holder->file_path, incoming_file);
+    if (by_path == 0) {
+        return false;
+    }
+    int holder_rank = qn_claim_rank(holder->label, holder->file_path);
+    int incoming_rank = qn_claim_rank(incoming_label, incoming_file);
+    if (holder_rank != incoming_rank) {
+        return holder_rank < incoming_rank;
+    }
+    return by_path < 0;
 }
 
 static int64_t upsert_node_impl(ctx_gbuf_t *gb, const char *label, const char *name,
@@ -588,7 +630,7 @@ static int64_t upsert_node_impl(ctx_gbuf_t *gb, const char *label, const char *n
             return existing->id;
         }
         /* Deterministic collision survivor — see qn_claim_loses. */
-        if (qn_claim_loses(existing, file_path)) {
+        if (qn_claim_loses(existing, label, file_path)) {
             return existing->id;
         }
         /* Update in-place. Strdup new values BEFORE freeing old ones,
@@ -1122,7 +1164,7 @@ static void merge_update_existing(ctx_gbuf_node_t *existing, const ctx_gbuf_node
      * depends on whether the collision happened inside one worker or across
      * two. The remap below still runs either way: edges from the losing node
      * must land on the survivor regardless of which side won. */
-    if (!sn->scope_local && !qn_claim_loses(existing, sn->file_path)) {
+    if (!sn->scope_local && !qn_claim_loses(existing, sn->label, sn->file_path)) {
         merge_overwrite_fields(existing, sn);
     }
 

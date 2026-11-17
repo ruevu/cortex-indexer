@@ -631,56 +631,107 @@ TEST(gbuf_find_edges_by_target_type_multiple) {
 }
 
 
-/* ── QN collision determinism ─────────────────────────────────────
+/* ── QN collision survivor ────────────────────────────────────────
  *
- * Distinct files can land on one qualified name — a module qn drops the file
- * extension, so Component.tsx and Component.css reduce to the same string.
- * The buffer is keyed by qn, so one of them wins. Last-write-wins made the
- * winner depend on arrival order, and under parallel extraction that is the
- * thread schedule: the same tree indexed twice produced different graphs.
- * The survivor is now the lexicographically smaller file_path, from any
- * interleaving. */
+ * Distinct claims can land on one qualified name, and the buffer is keyed by
+ * qn, so exactly one survives. A module qn drops the extension, so
+ * Component.tsx and Component.css share one; a Folder's qn is the module qn of
+ * its path, so store.ts and store/ share one; a symbol qn is its file's module
+ * qn plus its name, so a `persister` declared in worker.ts shares one with the
+ * module worker/persister.ts.
+ *
+ * The qn of a module is what an extension-less import specifier resolves
+ * against, so the survivor is the claim TypeScript's resolution would pick: a
+ * JS/TS-family module, file before directory, extensions in TypeScript's
+ * order. Every other collision keeps the file_path order, so the survivor
+ * never depends on arrival order or on how the files were sharded. */
 
-TEST(gbuf_qn_collision_survivor_is_order_independent) {
-    const char *files[2] = {"ui/Button.css", "ui/Button.tsx"};
+typedef struct {
+    const char *label;
+    const char *file;
+} qn_claim_t;
 
+/* Claim one qn with `a` and `b`, in both orders, through both the upsert path
+ * (a collision inside one worker) and the merge path (across two workers).
+ * Returns 0 when every run keeps `want`. */
+static int qn_survivor_is(qn_claim_t a, qn_claim_t b, qn_claim_t want) {
+    const qn_claim_t claims[2] = {a, b};
     for (int first = 0; first < 2; first++) {
+        const qn_claim_t *x = &claims[first];
+        const qn_claim_t *y = &claims[1 - first];
+
         ctx_gbuf_t *gb = ctx_gbuf_new("test", "/tmp");
-        ctx_gbuf_upsert_node(gb, "Module", "a", "test.ui.Button", files[first], 1, 5, "{}");
-        ctx_gbuf_upsert_node(gb, "Module", "b", "test.ui.Button", files[1 - first], 1, 5, "{}");
-
-        /* One node either way — the collision is real, not a duplicate. */
+        ctx_gbuf_upsert_node(gb, x->label, "x", "test.q", x->file, 1, 5, "{}");
+        ctx_gbuf_upsert_node(gb, y->label, "y", "test.q", y->file, 1, 5, "{}");
         ASSERT_EQ(ctx_gbuf_node_count(gb), 1);
-
-        const ctx_gbuf_node_t *n = ctx_gbuf_find_by_qn(gb, "test.ui.Button");
+        const ctx_gbuf_node_t *n = ctx_gbuf_find_by_qn(gb, "test.q");
         ASSERT_NOT_NULL(n);
-        ASSERT_STR_EQ(n->file_path, "ui/Button.css");
+        ASSERT_STR_EQ(n->label, want.label);
+        ASSERT_STR_EQ(n->file_path, want.file);
         ctx_gbuf_free(gb);
-    }
-    PASS();
-}
 
-/* The merge path is the other way a qn gets claimed twice — a collision across
- * two workers rather than inside one. Both paths must pick the same winner or
- * the result depends on how the file set happened to be sharded. */
-TEST(gbuf_merge_qn_collision_matches_upsert) {
-    const char *files[2] = {"ui/Button.css", "ui/Button.tsx"};
-
-    for (int first = 0; first < 2; first++) {
         ctx_gbuf_t *dst = ctx_gbuf_new("test", "/tmp");
         ctx_gbuf_t *src = ctx_gbuf_new("test", "/tmp");
-        ctx_gbuf_upsert_node(dst, "Module", "a", "test.ui.Button", files[first], 1, 5, "{}");
-        ctx_gbuf_upsert_node(src, "Module", "b", "test.ui.Button", files[1 - first], 1, 5, "{}");
-
+        ctx_gbuf_upsert_node(dst, x->label, "x", "test.q", x->file, 1, 5, "{}");
+        ctx_gbuf_upsert_node(src, y->label, "y", "test.q", y->file, 1, 5, "{}");
         ASSERT_EQ(ctx_gbuf_merge(dst, src), 0);
         ASSERT_EQ(ctx_gbuf_node_count(dst), 1);
-
-        const ctx_gbuf_node_t *n = ctx_gbuf_find_by_qn(dst, "test.ui.Button");
+        n = ctx_gbuf_find_by_qn(dst, "test.q");
         ASSERT_NOT_NULL(n);
-        ASSERT_STR_EQ(n->file_path, "ui/Button.css");
+        ASSERT_STR_EQ(n->label, want.label);
+        ASSERT_STR_EQ(n->file_path, want.file);
         ctx_gbuf_free(dst);
         ctx_gbuf_free(src);
     }
+    return 0;
+}
+
+/* `import './Button'` means Button.tsx; the stylesheet beside it used to win
+ * only because "Button.css" sorts first. */
+TEST(gbuf_qn_collision_component_beats_its_stylesheet) {
+    qn_claim_t tsx = {"Module", "ui/Button.tsx"};
+    qn_claim_t css = {"Module", "ui/Button.css"};
+    ASSERT_EQ(qn_survivor_is(css, tsx, tsx), 0);
+    PASS();
+}
+
+/* `import './store'` means store.ts before store/: a file before a directory. */
+TEST(gbuf_qn_collision_module_beats_the_folder_beside_it) {
+    qn_claim_t mod = {"Module", "src/store.ts"};
+    qn_claim_t dir = {"Folder", "src/store"};
+    ASSERT_EQ(qn_survivor_is(dir, mod, mod), 0);
+    PASS();
+}
+
+/* A variable `persister` in worker.ts against the module worker/persister.ts:
+ * losing the module would hang every definition of persister.ts, and every
+ * import of it, off one variable in another file. */
+TEST(gbuf_qn_collision_module_beats_a_symbol_from_another_file) {
+    qn_claim_t mod = {"Module", "src/events/worker/persister.ts"};
+    qn_claim_t var = {"Variable", "src/events/worker.ts"};
+    ASSERT_EQ(qn_survivor_is(var, mod, mod), 0);
+    PASS();
+}
+
+/* Two JS/TS modules: TypeScript tries .ts before .js, whichever path sorts
+ * first. */
+TEST(gbuf_qn_collision_ts_module_beats_js_module) {
+    qn_claim_t ts = {"Module", "lib/util.ts"};
+    qn_claim_t js = {"Module", "lib/util.js"};
+    ASSERT_EQ(qn_survivor_is(js, ts, ts), 0);
+    PASS();
+}
+
+/* Collisions that involve no JS/TS module keep the file_path order: a Go
+ * package is its directory, and a stylesheet pair has no import to honour. */
+TEST(gbuf_qn_collision_without_a_js_module_keeps_path_order) {
+    qn_claim_t go_dir = {"Folder", "pkg/store"};
+    qn_claim_t go_mod = {"Module", "pkg/store.go"};
+    ASSERT_EQ(qn_survivor_is(go_mod, go_dir, go_dir), 0);
+
+    qn_claim_t css = {"Module", "ui/Button.css"};
+    qn_claim_t scss = {"Module", "ui/Button.scss"};
+    ASSERT_EQ(qn_survivor_is(scss, css, css), 0);
     PASS();
 }
 
@@ -1043,8 +1094,11 @@ SUITE(graph_buffer) {
     RUN_TEST(gbuf_find_edges_by_target_type_multiple);
 
     /* QN collision determinism */
-    RUN_TEST(gbuf_qn_collision_survivor_is_order_independent);
-    RUN_TEST(gbuf_merge_qn_collision_matches_upsert);
+    RUN_TEST(gbuf_qn_collision_component_beats_its_stylesheet);
+    RUN_TEST(gbuf_qn_collision_module_beats_the_folder_beside_it);
+    RUN_TEST(gbuf_qn_collision_module_beats_a_symbol_from_another_file);
+    RUN_TEST(gbuf_qn_collision_ts_module_beats_js_module);
+    RUN_TEST(gbuf_qn_collision_without_a_js_module_keeps_path_order);
     RUN_TEST(gbuf_same_file_rewrite_still_updates);
 
     /* Merge tests */

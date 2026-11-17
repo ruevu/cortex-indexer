@@ -175,6 +175,24 @@ static int setup_import_repo(void) {
                                   "export function rendersLabel(): void {\n"
                                   "  Label();\n"
                                   "}\n"},
+        /* A component beside its stylesheet: kit/chip.tsx and kit/chip.css
+         * share a module qn, and the import means the component. */
+        {"kit/chip.tsx", "export function Chip(): void {}\n"},
+        {"kit/chip.css", ".chip { color: red; }\n"},
+        {"screens/chip_user.ts", "import { Chip } from '../kit/chip';\n"
+                                 "\n"
+                                 "export function showsChip(): void {\n"
+                                 "  Chip();\n"
+                                 "}\n"},
+        /* A module beside a directory of the same name, defining what is
+         * imported: feed.ts and feed/ share a qn, and `./feed` means feed.ts. */
+        {"feed.ts", "export function loadFeed(): void {}\n"},
+        {"feed/item.ts", "export function renderItem(): void {}\n"},
+        {"screens/feed_user.ts", "import { loadFeed } from '../feed';\n"
+                                 "\n"
+                                 "export function showsFeed(): void {\n"
+                                 "  loadFeed();\n"
+                                 "}\n"},
         /* Two classes with a same-named method; the caller imports one of
          * them, through its package barrel, and sits beside the other. */
         {"board/index.ts", "export * from './actions';\n"},
@@ -659,6 +677,48 @@ TEST(barrel_file_beside_its_directory_resolves_through_the_folder) {
     PASS();
 }
 
+/* The file an IMPORTS edge from `from` to `qn_suffix` lands on, or NULL. */
+static const char *import_target_file(const ctx_gbuf_t *gb, const char *from,
+                                      const char *qn_suffix) {
+    const ctx_gbuf_edge_t *e = pf_find_edge(gb, from, "IMPORTS", qn_suffix);
+    const ctx_gbuf_node_t *t = e ? ctx_gbuf_find_by_id(gb, e->target_id) : NULL;
+    return t ? t->file_path : NULL;
+}
+
+/* The label and file of the node holding `qn`, compared with `label`/`file`. */
+static bool qn_held_by(const ctx_gbuf_t *gb, const char *qn, const char *label,
+                       const char *file) {
+    const ctx_gbuf_node_t *n = ctx_gbuf_find_by_qn(gb, qn);
+    return n && n->label && n->file_path && strcmp(n->label, label) == 0 &&
+           strcmp(n->file_path, file) == 0;
+}
+
+static bool str_is(const char *a, const char *b) {
+    return a && b && strcmp(a, b) == 0;
+}
+
+/* The stylesheet beside a component must not take the component's module:
+ * the import, and the module's definitions, belong to the .tsx. */
+TEST(component_beside_its_stylesheet_keeps_its_module) {
+    BOTH_MODES(qn_held_by(g_seq, "ir-test.kit.chip", "Module", "kit/chip.tsx"),
+               qn_held_by(g_par, "ir-test.kit.chip", "Module", "kit/chip.tsx"));
+    BOTH_MODES(str_is(import_target_file(g_seq, "chip_user.ts", "kit.chip"), "kit/chip.tsx"),
+               str_is(import_target_file(g_par, "chip_user.ts", "kit.chip"), "kit/chip.tsx"));
+    PASS();
+}
+
+/* A module beside a directory of the same name keeps its module node, and
+ * the import of it lands there, not on the Folder. */
+TEST(module_beside_its_directory_keeps_its_module) {
+    BOTH_MODES(qn_held_by(g_seq, "ir-test.feed", "Module", "feed.ts"),
+               qn_held_by(g_par, "ir-test.feed", "Module", "feed.ts"));
+    BOTH_MODES(str_is(import_target_file(g_seq, "feed_user.ts", "feed"), "feed.ts"),
+               str_is(import_target_file(g_par, "feed_user.ts", "feed"), "feed.ts"));
+    BOTH_MODES(pf_call_resolved_by(g_seq, "showsFeed", "feed.loadFeed", "import_map"),
+               pf_call_resolved_by(g_par, "showsFeed", "feed.loadFeed", "import_map"));
+    PASS();
+}
+
 /* A definition in the index file itself is what a directory import names:
  * definitions there are qualified by the directory, not by `index`. */
 TEST(definition_in_the_index_file_is_a_direct_import_hit) {
@@ -756,6 +816,8 @@ SUITE(import_resolution) {
     RUN_TEST(barrel_import_with_two_candidates_prefers_the_shallower);
     RUN_TEST(barrel_import_with_two_candidates_is_not_high_confidence);
     RUN_TEST(barrel_file_beside_its_directory_resolves_through_the_folder);
+    RUN_TEST(component_beside_its_stylesheet_keeps_its_module);
+    RUN_TEST(module_beside_its_directory_keeps_its_module);
     RUN_TEST(definition_in_the_index_file_is_a_direct_import_hit);
     RUN_TEST(barrel_import_makes_its_package_reachable_for_a_guess);
     RUN_TEST(imported_module_outranks_its_package_for_a_guess);
