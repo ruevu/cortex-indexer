@@ -549,10 +549,18 @@ static const char *const IMPORTABLE_EXTS[] = {"ts",  "tsx", "js",  "jsx", "mts",
                                               "cts", "mjs", "cjs", "vue", "svelte"};
 enum { IMPORTABLE_EXT_COUNT = sizeof(IMPORTABLE_EXTS) / sizeof(IMPORTABLE_EXTS[0]) };
 
-/* Where a claim stands when it collides on a qualified name: the position of
- * its extension in IMPORTABLE_EXTS for a Module from a JS/TS-family file, or
- * IMPORTABLE_EXT_COUNT for every other claim. Lower wins. */
+/* Where a claim stands when it collides on a qualified name. Lower wins:
+ *   - a Module from a JS/TS-family file: its extension's position in
+ *     IMPORTABLE_EXTS;
+ *   - a markdown heading (Section): IMPORTABLE_EXT_COUNT + 1, below every
+ *     other claim. Docs beside code share qns with it (useThing/index.md's
+ *     "# useThing" and index.ts's useThing), and nothing imports or calls a
+ *     heading;
+ *   - every other claim: IMPORTABLE_EXT_COUNT. */
 static int qn_claim_rank(const char *label, const char *file_path) {
+    if (label && strcmp(label, "Section") == 0) {
+        return IMPORTABLE_EXT_COUNT + 1;
+    }
     if (!label || !file_path || strcmp(label, "Module") != 0) {
         return IMPORTABLE_EXT_COUNT;
     }
@@ -578,7 +586,9 @@ static int qn_claim_rank(const char *label, const char *file_path) {
  *   - a module qn drops the extension: Component.tsx and Component.css;
  *   - a Folder's qn is the module qn of its path: store.ts and store/;
  *   - a symbol qn is its module's qn plus its name: a `persister` declared in
- *     worker.ts and the module worker/persister.ts.
+ *     worker.ts and the module worker/persister.ts;
+ *   - a markdown heading is a symbol of its file, and symbol qns drop
+ *     `index`: useThing/index.md's "# useThing" and index.ts's useThing.
  *
  * A module qn is the key extension-less import specifiers resolve against, so
  * the survivor is the claim TypeScript's resolution would pick: a Module from
@@ -586,6 +596,9 @@ static int qn_claim_rank(const char *label, const char *file_path) {
  * before a stylesheet, and two such modules go by TypeScript's extension
  * order. Losing that module is not cosmetic: its definitions and every import
  * of it would hang off a stylesheet, a folder, or a variable in another file.
+ *
+ * A heading loses to every other claim. Nothing imports or calls one, so when
+ * it keeps the qn every call to the function it documents lands on the docs.
  *
  * Everything else falls back to a total order on file_path, which keeps the
  * survivor a property of the repository rather than of the thread schedule:

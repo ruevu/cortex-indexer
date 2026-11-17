@@ -193,6 +193,16 @@ static int setup_import_repo(void) {
                                  "export function showsFeed(): void {\n"
                                  "  loadFeed();\n"
                                  "}\n"},
+        /* A function documented beside itself, VitePress style: index.md
+         * opens with the heading "# useToggle", which shares a qn with the
+         * function index.ts exports. */
+        {"kit/useToggle/index.ts", "export function useToggle(): void {}\n"},
+        {"kit/useToggle/index.md", "# useToggle\n\nToggles a value.\n"},
+        {"screens/toggle_user.ts", "import { useToggle } from '../kit/useToggle';\n"
+                                   "\n"
+                                   "export function togglesIt(): void {\n"
+                                   "  useToggle();\n"
+                                   "}\n"},
         /* Two classes with a same-named method; the caller imports one of
          * them, through its package barrel, and sits beside the other. */
         {"board/index.ts", "export * from './actions';\n"},
@@ -719,6 +729,27 @@ TEST(module_beside_its_directory_keeps_its_module) {
     PASS();
 }
 
+/* The label of the node the CALLS edge from `from` to `qn_suffix` lands on. */
+static const char *call_target_label(const ctx_gbuf_t *gb, const char *from,
+                                     const char *qn_suffix) {
+    const ctx_gbuf_edge_t *e = pf_find_call(gb, from, qn_suffix);
+    const ctx_gbuf_node_t *t = e ? ctx_gbuf_find_by_id(gb, e->target_id) : NULL;
+    return t ? t->label : NULL;
+}
+
+/* A function keeps its qn over the doc heading beside it, and the call lands
+ * on the function, not on a markdown heading. */
+TEST(function_beside_its_doc_heading_keeps_its_qn) {
+    BOTH_MODES(qn_held_by(g_seq, "ir-test.kit.useToggle.useToggle", "Function",
+                          "kit/useToggle/index.ts"),
+               qn_held_by(g_par, "ir-test.kit.useToggle.useToggle", "Function",
+                          "kit/useToggle/index.ts"));
+    const char *toggle = "kit.useToggle.useToggle";
+    BOTH_MODES(str_is(call_target_label(g_seq, "togglesIt", toggle), "Function"),
+               str_is(call_target_label(g_par, "togglesIt", toggle), "Function"));
+    PASS();
+}
+
 /* A definition in the index file itself is what a directory import names:
  * definitions there are qualified by the directory, not by `index`. */
 TEST(definition_in_the_index_file_is_a_direct_import_hit) {
@@ -818,6 +849,7 @@ SUITE(import_resolution) {
     RUN_TEST(barrel_file_beside_its_directory_resolves_through_the_folder);
     RUN_TEST(component_beside_its_stylesheet_keeps_its_module);
     RUN_TEST(module_beside_its_directory_keeps_its_module);
+    RUN_TEST(function_beside_its_doc_heading_keeps_its_qn);
     RUN_TEST(definition_in_the_index_file_is_a_direct_import_hit);
     RUN_TEST(barrel_import_makes_its_package_reachable_for_a_guess);
     RUN_TEST(imported_module_outranks_its_package_for_a_guess);

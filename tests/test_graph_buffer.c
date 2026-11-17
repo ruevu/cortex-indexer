@@ -735,6 +735,34 @@ TEST(gbuf_qn_collision_without_a_js_module_keeps_path_order) {
     PASS();
 }
 
+/* A function documented beside itself, VitePress style: useThing/index.md
+ * opens with "# useThing", and index.ts exports useThing. Both claim one qn.
+ * Nothing imports or calls a heading, so the code keeps the qn however the
+ * paths sort ("index.md" sorts before "index.ts", "README.md" before
+ * "parse.py"). */
+TEST(gbuf_qn_collision_code_beats_a_doc_heading) {
+    qn_claim_t fn = {"Function", "core/useThing/index.ts"};
+    qn_claim_t heading = {"Section", "core/useThing/index.md"};
+    ASSERT_EQ(qn_survivor_is(heading, fn, fn), 0);
+
+    qn_claim_t py_fn = {"Function", "lib/parse.py"};
+    qn_claim_t readme = {"Section", "lib/README.md"};
+    ASSERT_EQ(qn_survivor_is(readme, py_fn, py_fn), 0);
+
+    qn_claim_t dir = {"Folder", "pkg/store"};
+    qn_claim_t index_heading = {"Section", "pkg/index.md"};
+    ASSERT_EQ(qn_survivor_is(index_heading, dir, dir), 0);
+    PASS();
+}
+
+/* Two headings tie, and the tie keeps the file_path order. */
+TEST(gbuf_qn_collision_between_doc_headings_keeps_path_order) {
+    qn_claim_t a = {"Section", "docs/a.md"};
+    qn_claim_t b = {"Section", "docs/b.md"};
+    ASSERT_EQ(qn_survivor_is(b, a, a), 0);
+    PASS();
+}
+
 /* A re-write of the SAME file is enrichment, not a collision: a later pass
  * refining a node it already owns must still take effect. */
 TEST(gbuf_same_file_rewrite_still_updates) {
@@ -1099,6 +1127,8 @@ SUITE(graph_buffer) {
     RUN_TEST(gbuf_qn_collision_module_beats_a_symbol_from_another_file);
     RUN_TEST(gbuf_qn_collision_ts_module_beats_js_module);
     RUN_TEST(gbuf_qn_collision_without_a_js_module_keeps_path_order);
+    RUN_TEST(gbuf_qn_collision_code_beats_a_doc_heading);
+    RUN_TEST(gbuf_qn_collision_between_doc_headings_keeps_path_order);
     RUN_TEST(gbuf_same_file_rewrite_still_updates);
 
     /* Merge tests */
