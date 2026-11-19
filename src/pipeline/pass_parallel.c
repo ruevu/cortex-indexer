@@ -1228,10 +1228,17 @@ static const ctx_gbuf_node_t *find_source_node(const ctx_gbuf_t *gbuf, const cha
     return src;
 }
 
+/* The local names a file imports only from packages (T-jnpg). */
+typedef struct {
+    const char **names;
+    int count;
+} pp_externals_t;
+
 /* Resolve calls for one file and emit CALLS/HTTP_CALLS/ASYNC_CALLS edges. */
 static void resolve_file_calls(resolve_ctx_t *rc, resolve_worker_state_t *ws, CtxFileResult *result,
                                const char *rel, CtxLanguage lang, const char *module_qn,
-                               const char **imp_keys, const char **imp_vals, int imp_count) {
+                               const char **imp_keys, const char **imp_vals, int imp_count,
+                               const pp_externals_t *externals) {
     for (int c = 0; c < result->calls.count; c++) {
         CtxCall *call = &result->calls.items[c];
         if (!call->callee_name) {
@@ -1263,7 +1270,9 @@ static void resolve_file_calls(resolve_ctx_t *rc, resolve_worker_state_t *ws, Ct
             continue;
         }
         bool bind_plain = ctx_registry_admits_member_call(rc->registry, lang, call->callee_name,
-                                                          &res, &result->imports);
+                                                          &res, &result->imports) &&
+                          ctx_registry_admits_bare_call(lang, call->callee_name, &res,
+                                                        externals->names, externals->count);
         emit_service_edge(ws->local_edge_buf, source_node, target_node, call, &res, bind_plain,
                           module_qn, rc->registry, rc->main_gbuf, imp_keys, imp_vals, imp_count);
         if (bind_plain) {
@@ -1477,14 +1486,15 @@ static void resolve_worker(int worker_id, void *ctx_ptr) {
         const char **imp_keys = NULL;
         const char **imp_vals = NULL;
         int imp_count = 0;
-        ctx_pipeline_import_map_from_result(rc->pipeline_ctx, rel, result, &imp_keys, &imp_vals,
-                                            &imp_count);
+        pp_externals_t externals = {0};
+        ctx_pipeline_import_map_with_externals(rc->pipeline_ctx, rel, result, &imp_keys, &imp_vals,
+                                               &imp_count, &externals.names, &externals.count);
 
         char *module_qn = ctx_pipeline_fqn_module(rc->project_name, rel);
 
         /* ── CALLS resolution ──────────────────────────────────── */
         resolve_file_calls(rc, ws, result, rel, rc->files[file_idx].language, module_qn, imp_keys,
-                           imp_vals, imp_count);
+                           imp_vals, imp_count, &externals);
 
         /* ── USAGE resolution ──────────────────────────────────── */
         resolve_file_usages(rc, ws, result, rel, module_qn, imp_keys, imp_vals, imp_count);
@@ -1500,6 +1510,7 @@ static void resolve_worker(int worker_id, void *ctx_ptr) {
 
         free(module_qn);
         free_import_map(imp_keys, imp_vals, imp_count);
+        free((void *)externals.names);
     }
 }
 

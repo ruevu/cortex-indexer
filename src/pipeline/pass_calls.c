@@ -93,14 +93,20 @@ static char *extract_local_name_from_json(const char *props_json) {
 
 static int build_import_map(ctx_pipeline_ctx_t *ctx, const char *rel_path,
                             const CtxFileResult *result, const char ***out_keys,
-                            const char ***out_vals, int *out_count) {
+                            const char ***out_vals, int *out_count, const char ***out_externals,
+                            int *out_external_count) {
     *out_keys = NULL;
     *out_vals = NULL;
     *out_count = 0;
+    if (out_externals) {
+        *out_externals = NULL;
+        *out_external_count = 0;
+    }
 
     /* Fast path: from the cached extraction result (no JSON parsing) */
     if (result && result->imports.count > 0) {
-        ctx_pipeline_import_map_from_result(ctx, rel_path, result, out_keys, out_vals, out_count);
+        ctx_pipeline_import_map_with_externals(ctx, rel_path, result, out_keys, out_vals,
+                                               out_count, out_externals, out_external_count);
         return 0;
     }
 
@@ -337,12 +343,19 @@ static int try_emit_global_http_call(ctx_pipeline_ctx_t *ctx, const CtxCall *cal
     return SKIP_ONE;
 }
 
+/* The local names a file imports only from packages (T-jnpg). */
+typedef struct {
+    const char **names;
+    int count;
+} pc_externals_t;
+
 /* Resolve one call and emit the appropriate edge. Returns 1 if resolved, 0 if not.
- * A member call refused by ctx_registry_admits_member_call counts as unresolved. */
+ * A call refused by ctx_registry_admits_member_call or
+ * ctx_registry_admits_bare_call counts as unresolved. */
 static int resolve_single_call(ctx_pipeline_ctx_t *ctx, CtxCall *call, const char *rel,
                                CtxLanguage lang, const CtxImportArray *imports,
                                const char *module_qn, const char **imp_keys, const char **imp_vals,
-                               int imp_count) {
+                               int imp_count, const pc_externals_t *externals) {
     const ctx_gbuf_node_t *source_node = calls_find_source(ctx, rel, call->enclosing_func_qn);
     if (!source_node) {
         return 0;
@@ -357,7 +370,9 @@ static int resolve_single_call(ctx_pipeline_ctx_t *ctx, CtxCall *call, const cha
         return try_emit_global_http_call(ctx, call, source_node);
     }
     bool bind_plain =
-        ctx_registry_admits_member_call(ctx->registry, lang, call->callee_name, &res, imports);
+        ctx_registry_admits_member_call(ctx->registry, lang, call->callee_name, &res, imports) &&
+        ctx_registry_admits_bare_call(lang, call->callee_name, &res, externals->names,
+                                      externals->count);
     emit_classified_edge(ctx, call, source_node, target_node, &res, bind_plain, module_qn, imp_keys,
                          imp_vals, imp_count);
     return bind_plain ? SKIP_ONE : 0;
@@ -415,7 +430,9 @@ int ctx_pipeline_pass_calls(ctx_pipeline_ctx_t *ctx, const ctx_file_info_t *file
         const char **imp_keys = NULL;
         const char **imp_vals = NULL;
         int imp_count = 0;
-        build_import_map(ctx, rel, result, &imp_keys, &imp_vals, &imp_count);
+        pc_externals_t externals = {0};
+        build_import_map(ctx, rel, result, &imp_keys, &imp_vals, &imp_count, &externals.names,
+                         &externals.count);
 
         /* Compute module QN for same-module resolution */
         char *module_qn = ctx_pipeline_fqn_module(ctx->project_name, rel);
@@ -428,7 +445,7 @@ int ctx_pipeline_pass_calls(ctx_pipeline_ctx_t *ctx, const ctx_file_info_t *file
             }
             total_calls++;
             if (resolve_single_call(ctx, call, rel, files[i].language, &result->imports, module_qn,
-                                    imp_keys, imp_vals, imp_count)) {
+                                    imp_keys, imp_vals, imp_count, &externals)) {
                 resolved++;
             } else {
                 unresolved++;
@@ -437,6 +454,7 @@ int ctx_pipeline_pass_calls(ctx_pipeline_ctx_t *ctx, const ctx_file_info_t *file
 
         free(module_qn);
         free_import_map(imp_keys, imp_vals, imp_count);
+        free((void *)externals.names);
         if (result_owned) {
             ctx_free_result(result);
         }
@@ -570,7 +588,8 @@ void ctx_pipeline_pass_fastapi_depends(ctx_pipeline_ctx_t *ctx, const ctx_file_i
         const char **imp_keys = NULL;
         const char **imp_vals = NULL;
         int imp_count = 0;
-        build_import_map(ctx, files[i].rel_path, result, &imp_keys, &imp_vals, &imp_count);
+        build_import_map(ctx, files[i].rel_path, result, &imp_keys, &imp_vals, &imp_count, NULL,
+                         NULL);
 
         for (int d = 0; d < result->defs.count; d++) {
             CtxDefinition *def = &result->defs.items[d];

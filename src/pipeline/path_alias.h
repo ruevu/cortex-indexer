@@ -40,8 +40,10 @@ enum { CTX_PATH_ALIAS_MAX_TARGETS = 8, CTX_PATH_ALIAS_MAX_CANDIDATES = 9 };
 
 /* Walk repo_path for tsconfig.json / jsconfig.json files and load each one's
  * effective aliases. Directories discovery skips (.git, node_modules, ...)
- * and those the root .gitignore ignores are not walked. NULL when the repo
- * has no config with `paths` or `baseUrl`. Free with ctx_path_aliases_free. */
+ * and those the root .gitignore ignores are not walked. The same walk keeps
+ * the `name` of every package.json it passes, for ctx_path_aliases_claims.
+ * NULL when the repo has no config with `paths` or `baseUrl` and no named
+ * package. Free with ctx_path_aliases_free. */
 ctx_path_aliases_t *ctx_path_aliases_load(const char *repo_path);
 
 /* NULL-safe. */
@@ -59,5 +61,24 @@ bool ctx_path_aliases_is_script(const char *rel);
  * Returns 0 for a relative specifier, or when no config applies. */
 int ctx_path_aliases_candidates(const ctx_path_aliases_t *aliases, const char *source_rel,
                                 const char *specifier, char **out, int max);
+
+/* Whether an import specifier, seen from the file at source_rel, may name
+ * code in the tree even when no node was found for it (todo T-jnpg). True for:
+ *   - a relative or absolute path (`./x`, `../x`, `/x`), from any file;
+ * and, from a script file (ctx_path_aliases_is_script):
+ *   - a specifier no package can have: `~/x`, `@/x`, `#imports`, `$lib/x`,
+ *     `virtual:x` — an alias some framework or bundler resolves, often into
+ *     the tree, with no tsconfig to say so;
+ *   - a package the tree declares: a package.json `name`, matched whole or as
+ *     the package of a subpath (`@acme/kit/src/use` is `@acme/kit`);
+ *   - a specifier the file's `paths` match;
+ *   - a specifier whose first segment is a directory or file under the file's
+ *     baseUrl.
+ * Everything else — `react`, `@scope/pkg`, `node:path` — is a package the tree
+ * does not hold. Permissive by construction: a wrong `true` keeps a guessed
+ * call edge, a wrong `false` would drop a real one. NULL aliases (no config,
+ * no package.json name in the tree) leaves the path and shape rules. */
+bool ctx_path_aliases_claims(const ctx_path_aliases_t *aliases, const char *source_rel,
+                             const char *specifier);
 
 #endif /* CTX_PATH_ALIAS_H */

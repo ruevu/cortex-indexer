@@ -19,6 +19,7 @@
 #include "foundation/log.h"
 #include "foundation/platform.h"
 
+#include <ctype.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -33,6 +34,8 @@ enum {
     PA_MAX_TARGETS = CTX_PATH_ALIAS_MAX_TARGETS,
     PA_MAX_FILE_BYTES = 1 << 20,   /* a tsconfig larger than this is skipped */
     PA_PATH_MAX = 1024,
+    PA_MAX_PACKAGES = 4096,        /* workspace package names kept from one repo walk */
+    PA_MAX_BASE_ENTRIES = 4096,    /* entries listed under one baseUrl */
 };
 
 typedef struct {
@@ -55,15 +58,23 @@ typedef struct {
     char *base_url;  /* repo-relative, resolved; NULL when unset */
 } pa_options_t;
 
+/* A sorted set of strings. */
+typedef struct {
+    char **items;
+    int count;
+} pa_names_t;
+
 typedef struct {
     char *dir; /* repo-relative directory of the tsconfig/jsconfig ("" = root) */
     pa_patterns_t paths;
     char *base_url;
+    pa_names_t base_entries; /* what baseUrl reaches: directory names, file stems */
 } pa_scope_t;
 
 struct ctx_path_aliases {
     pa_scope_t *scopes; /* deepest directory first */
     int count;
+    pa_names_t packages; /* `name` of every package.json in the tree */
 };
 
 /* ── Paths ───────────────────────────────────────────────────────── */
@@ -128,6 +139,42 @@ static bool pa_exists(const char *repo, const char *rel) {
     char abs[PA_PATH_MAX];
     int n = snprintf(abs, sizeof(abs), "%s/%s", repo, rel);
     return n > 0 && (size_t)n < sizeof(abs) && ctx_file_exists(abs) && !ctx_is_dir(abs);
+}
+
+/* ── Name sets ───────────────────────────────────────────────────── */
+
+static int pa_strcmp_ptr(const void *a, const void *b) {
+    return strcmp(*(char *const *)a, *(char *const *)b);
+}
+
+/* Sort and drop duplicates; call once, after the last add. */
+static void pa_names_seal(pa_names_t *ns) {
+    if (ns->count <= 1) {
+        return;
+    }
+    qsort(ns->items, (size_t)ns->count, sizeof(char *), pa_strcmp_ptr);
+    int kept = 1;
+    for (int i = 1; i < ns->count; i++) {
+        if (strcmp(ns->items[i], ns->items[kept - 1]) == 0) {
+            free(ns->items[i]);
+        } else {
+            ns->items[kept++] = ns->items[i];
+        }
+    }
+    ns->count = kept;
+}
+
+static bool pa_names_has(const pa_names_t *ns, const char *name) {
+    return ns->count > 0 &&
+           bsearch(&name, ns->items, (size_t)ns->count, sizeof(char *), pa_strcmp_ptr) != NULL;
+}
+
+static void pa_names_free(pa_names_t *ns) {
+    for (int i = 0; i < ns->count; i++) {
+        free(ns->items[i]);
+    }
+    free(ns->items);
+    *ns = (pa_names_t){0};
 }
 
 /* ── Patterns ────────────────────────────────────────────────────── */
@@ -349,7 +396,29 @@ typedef struct {
     ctx_gitignore_t *gitignore;
     char **configs; /* repo-relative paths */
     int count;
+    pa_names_t packages; /* capacity PA_MAX_PACKAGES */
 } pa_walk_t;
+
+/* The `name` a package.json in rel_dir declares, kept in w->packages. A
+ * workspace's own packages are what an import of a package name can mean
+ * inside the tree; node_modules is never walked, so a dependency's manifest
+ * adds nothing. */
+static void pa_collect_package(pa_walk_t *w, const char *rel_dir) {
+    if (!w->packages.items || w->packages.count >= PA_MAX_PACKAGES) {
+        return;
+    }
+    char *rel = pa_join(rel_dir, "package.json");
+    yyjson_doc *doc = rel && pa_exists(w->repo, rel) ? pa_read_json(w->repo, rel) : NULL;
+    free(rel);
+    if (!doc) {
+        return;
+    }
+    const char *name = yyjson_get_str(yyjson_obj_get(yyjson_doc_get_root(doc), "name"));
+    if (name && name[0]) {
+        w->packages.items[w->packages.count++] = strdup(name);
+    }
+    yyjson_doc_free(doc);
+}
 
 static void pa_walk(pa_walk_t *w, const char *rel_dir, int depth) {
     if (w->count >= PA_MAX_CONFIGS || depth > PA_MAX_WALK_DEPTH) {
@@ -366,6 +435,7 @@ static void pa_walk(pa_walk_t *w, const char *rel_dir, int depth) {
         }
         free(rel);
     }
+    pa_collect_package(w, rel_dir);
     ctx_dir_t *d = ctx_opendir(abs);
     if (!d) {
         return;
@@ -390,6 +460,38 @@ static int pa_scope_deeper_first(const void *a, const void *b) {
     return la < lb ? 1 : (la > lb ? -1 : 0);
 }
 
+/* What a specifier under baseUrl can start with: the names directly under
+ * it, a file by its stem as well ("legacy" for legacy.ts). Directories
+ * discovery skips (node_modules, dist, ...) and dotted names are left out:
+ * a baseUrl of "." must not make every installed package a project path. */
+static pa_names_t pa_list_base_entries(const char *repo, const char *base_url) {
+    pa_names_t ns = {0};
+    char abs[PA_PATH_MAX];
+    int n = snprintf(abs, sizeof(abs), "%s%s%s", repo, base_url[0] ? "/" : "", base_url);
+    ctx_dir_t *d = n > 0 && (size_t)n < sizeof(abs) ? ctx_opendir(abs) : NULL;
+    if (!d) {
+        return ns;
+    }
+    ns.items = calloc(PA_MAX_BASE_ENTRIES, sizeof(char *));
+    ctx_dirent_t *ent;
+    while (ns.items && (ent = ctx_readdir(d)) != NULL && ns.count < PA_MAX_BASE_ENTRIES - 1) {
+        if (ent->name[0] == '.' || (ent->is_dir && ctx_should_skip_dir(ent->name, CTX_MODE_FULL))) {
+            continue;
+        }
+        ns.items[ns.count++] = strdup(ent->name);
+        const char *dot = ent->is_dir ? NULL : strrchr(ent->name, '.');
+        if (dot && dot != ent->name) {
+            ns.items[ns.count++] = ctx_strndup(ent->name, (size_t)(dot - ent->name));
+        }
+    }
+    if (ns.count >= PA_MAX_BASE_ENTRIES - 1) {
+        ctx_log_warn("path_alias.base_entries.cap_hit", "base_url", base_url);
+    }
+    ctx_closedir(d);
+    pa_names_seal(&ns);
+    return ns;
+}
+
 /* ── Public API ──────────────────────────────────────────────────── */
 
 void ctx_path_aliases_free(ctx_path_aliases_t *aliases) {
@@ -400,8 +502,10 @@ void ctx_path_aliases_free(ctx_path_aliases_t *aliases) {
         free(aliases->scopes[i].dir);
         pa_patterns_free(&aliases->scopes[i].paths);
         free(aliases->scopes[i].base_url);
+        pa_names_free(&aliases->scopes[i].base_entries);
     }
     free(aliases->scopes);
+    pa_names_free(&aliases->packages);
     free(aliases);
 }
 
@@ -409,8 +513,11 @@ ctx_path_aliases_t *ctx_path_aliases_load(const char *repo_path) {
     if (!repo_path || !repo_path[0]) {
         return NULL;
     }
-    pa_walk_t w = {.repo = repo_path, .configs = calloc(PA_MAX_CONFIGS, sizeof(char *))};
+    pa_walk_t w = {.repo = repo_path,
+                   .configs = calloc(PA_MAX_CONFIGS, sizeof(char *)),
+                   .packages = {.items = calloc(PA_MAX_PACKAGES, sizeof(char *))}};
     if (!w.configs) {
+        pa_names_free(&w.packages);
         return NULL;
     }
     char gitignore_path[PA_PATH_MAX];
@@ -421,6 +528,10 @@ ctx_path_aliases_t *ctx_path_aliases_load(const char *repo_path) {
     if (w.count >= PA_MAX_CONFIGS) {
         ctx_log_warn("path_alias.configs.cap_hit", "repo", repo_path);
     }
+    if (w.packages.count >= PA_MAX_PACKAGES) {
+        ctx_log_warn("path_alias.packages.cap_hit", "repo", repo_path);
+    }
+    pa_names_seal(&w.packages);
 
     ctx_path_aliases_t *aliases = calloc(1, sizeof(*aliases));
     if (aliases && w.count > 0) {
@@ -438,6 +549,9 @@ ctx_path_aliases_t *ctx_path_aliases_load(const char *repo_path) {
             s->dir = pa_dirname(w.configs[i]);
             s->paths = opts.paths;
             s->base_url = opts.base_url;
+            if (s->base_url) {
+                s->base_entries = pa_list_base_entries(repo_path, s->base_url);
+            }
             any = any || s->paths.count > 0 || s->base_url;
             opts.paths = (pa_patterns_t){0};
             opts.base_url = NULL;
@@ -446,6 +560,12 @@ ctx_path_aliases_t *ctx_path_aliases_load(const char *repo_path) {
         free(w.configs[i]);
     }
     free(w.configs);
+    if (aliases) {
+        aliases->packages = w.packages;
+        w.packages = (pa_names_t){0};
+        any = any || aliases->packages.count > 0;
+    }
+    pa_names_free(&w.packages);
     if (!any) {
         ctx_path_aliases_free(aliases);
         return NULL;
@@ -552,4 +672,116 @@ int ctx_path_aliases_candidates(const ctx_path_aliases_t *aliases, const char *s
         }
     }
     return n;
+}
+
+/* Whether [s, s+len) is shaped like an npm name or scope: a letter or digit,
+ * then letters, digits, '.', '_' and '-'. */
+static bool pa_npm_segment(const char *s, size_t len) {
+    if (len == 0 || !isalnum((unsigned char)s[0])) {
+        return false;
+    }
+    for (size_t i = 1; i < len; i++) {
+        unsigned char c = (unsigned char)s[i];
+        if (!isalnum(c) && c != '.' && c != '_' && c != '-') {
+            return false;
+        }
+    }
+    return true;
+}
+
+/* Whether a specifier can name a package at all: a Node, npm, JSR or Bun
+ * scheme (`node:path`), or an npm name (`react`, `@scope/pkg`) with any
+ * subpath. `~/x`, `@/x`, `#imports`, `$lib/x` and `virtual:x` cannot: they are
+ * aliases a framework or bundler resolves, often into the tree, or virtual
+ * modules. */
+static bool pa_package_shaped(const char *specifier) {
+    static const char *const schemes[] = {"node:", "npm:", "jsr:", "bun:"};
+    for (size_t i = 0; i < sizeof(schemes) / sizeof(schemes[0]); i++) {
+        if (strncmp(specifier, schemes[i], strlen(schemes[i])) == 0) {
+            return true;
+        }
+    }
+    const char *name = specifier;
+    if (specifier[0] == '@') {
+        const char *slash = strchr(specifier, '/');
+        if (!slash || !pa_npm_segment(specifier + 1, (size_t)(slash - specifier - 1))) {
+            return false;
+        }
+        name = slash + 1;
+    }
+    const char *end = strchr(name, '/');
+    return pa_npm_segment(name, end ? (size_t)(end - name) : strlen(name));
+}
+
+/* Whether the tree declares the package a specifier names: the whole
+ * specifier, else each shorter prefix ending at a '/', so a subpath import
+ * ("@acme/kit/src/use") finds its package ("@acme/kit"). */
+static bool pa_names_package(const ctx_path_aliases_t *aliases, const char *specifier) {
+    if (aliases->packages.count == 0) {
+        return false;
+    }
+    char buf[PA_PATH_MAX];
+    int n = snprintf(buf, sizeof(buf), "%s", specifier);
+    if (n <= 0 || (size_t)n >= sizeof(buf)) {
+        return false;
+    }
+    for (;;) {
+        if (pa_names_has(&aliases->packages, buf)) {
+            return true;
+        }
+        char *slash = strrchr(buf, '/');
+        if (!slash) {
+            return false;
+        }
+        *slash = '\0';
+    }
+}
+
+/* Whether baseUrl reaches something real for the specifier: its first
+ * segment is a directory or file directly under baseUrl. */
+static bool pa_base_reaches(const pa_scope_t *scope, const char *specifier) {
+    if (!scope->base_url || scope->base_entries.count == 0) {
+        return false;
+    }
+    const char *slash = strchr(specifier, '/');
+    size_t len = slash ? (size_t)(slash - specifier) : strlen(specifier);
+    char first[PA_PATH_MAX];
+    if (len == 0 || len >= sizeof(first)) {
+        return false;
+    }
+    memcpy(first, specifier, len);
+    first[len] = '\0';
+    return pa_names_has(&scope->base_entries, first);
+}
+
+bool ctx_path_aliases_claims(const ctx_path_aliases_t *aliases, const char *source_rel,
+                             const char *specifier) {
+    if (!specifier || !specifier[0]) {
+        return false;
+    }
+    if (specifier[0] == '.' || specifier[0] == '/') {
+        return true;
+    }
+    if (!source_rel || !ctx_path_aliases_is_script(source_rel)) {
+        return false;
+    }
+    if (!pa_package_shaped(specifier)) {
+        return true;
+    }
+    if (!aliases) {
+        return false;
+    }
+    if (pa_names_package(aliases, specifier)) {
+        return true;
+    }
+    const pa_scope_t *scope = pa_scope_for(aliases, source_rel);
+    if (!scope) {
+        return false;
+    }
+    size_t star_start = 0;
+    size_t star_len = 0;
+    if (pa_best_pattern(&scope->paths, specifier, &star_start, &star_len)) {
+        return true;
+    }
+    return pa_base_reaches(scope, specifier);
 }

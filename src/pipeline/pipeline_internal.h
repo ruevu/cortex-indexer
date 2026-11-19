@@ -79,6 +79,19 @@ void ctx_pipeline_import_map_from_result(const ctx_pipeline_ctx_t *ctx, const ch
                                          const CtxFileResult *result, const char ***out_keys,
                                          const char ***out_vals, int *out_count);
 
+/* ctx_pipeline_import_map_from_result, plus the file's external names (todo
+ * T-jnpg): in a script file, the local names imported only from specifiers
+ * that name no node and that nothing in the tree claims
+ * (ctx_path_aliases_claims) — `render` from '@testing-library/react',
+ * `resolve` from 'node:path'. A name with any in-tree import is not one.
+ * The names are borrowed from result; the caller frees only the array. NULL
+ * out_externals asks for the map alone. */
+void ctx_pipeline_import_map_with_externals(const ctx_pipeline_ctx_t *ctx, const char *source_rel,
+                                            const CtxFileResult *result, const char ***out_keys,
+                                            const char ***out_vals, int *out_count,
+                                            const char ***out_externals,
+                                            int *out_external_count);
+
 /* Check cancellation. Returns non-zero if cancelled. */
 static inline int ctx_pipeline_check_cancel(const ctx_pipeline_ctx_t *ctx) {
     return atomic_load(ctx->cancelled) ? CTX_NOT_FOUND : 0;
@@ -376,6 +389,26 @@ void ctx_pipeline_create_route_nodes(ctx_gbuf_t *gb);
 bool ctx_registry_admits_member_call(const ctx_registry_t *r, CtxLanguage lang,
                                      const char *callee_name, const ctx_resolution_t *res,
                                      const CtxImportArray *imports);
+
+/* Whether a plain call (no `.` in the callee) may bind where the registry
+ * resolved it (todo T-jnpg). In JavaScript, TypeScript, TSX, Vue and Svelte it
+ * is refused when the strategy guessed by name alone (unique_name,
+ * suffix_match, fuzzy) and the calling file imports the callee only from
+ * package specifiers: names nothing in the tree claims (see
+ * ctx_path_aliases_claims). `render()` imported from '@testing-library/react'
+ * used to land on the project's one function named `render`; the call runs
+ * the package's code, which the graph does not hold.
+ *
+ * external_names are those local names, from
+ * ctx_pipeline_import_map_with_externals. A name also imported from a module
+ * in the tree is not among them, and import_map / same_module resolutions are
+ * kept: they followed the import or the file itself.
+ *
+ * Only the plain CALLS edge is withheld, as with
+ * ctx_registry_admits_member_call. Everything else returns true. */
+bool ctx_registry_admits_bare_call(CtxLanguage lang, const char *callee_name,
+                                   const ctx_resolution_t *res, const char *const *external_names,
+                                   int external_count);
 
 /* ── Pass function prototypes ────────────────────────────────────── */
 

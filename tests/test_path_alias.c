@@ -67,6 +67,14 @@ static int setup_pa_repo(void) {
                               "{ \"compilerOptions\": { \"paths\": { \"#b/*\": [\"b/*\"] } } }\n"},
         /* Unreadable as JSON: skipped, never fatal. */
         {"bad/tsconfig.json", "{ \"compilerOptions\": { \"paths\": \n"},
+        /* What web's baseUrl reaches: a directory and a file. */
+        {"web/shared/format.ts", "export const f = 1;\n"},
+        {"web/legacy.ts", "export const l = 1;\n"},
+        /* Workspace packages the tree declares, and one it only depends on. */
+        {"libs/kit/package.json", "{ \"name\": \"@acme/kit\", \"version\": \"1.0.0\" }\n"},
+        {"tools/cli/package.json", "{ \"name\": \"acme-cli\" }\n"},
+        {"package.json", "{ \"private\": true }\n"},
+        {"node_modules/antd/package.json", "{ \"name\": \"antd\" }\n"},
     };
     for (size_t i = 0; i < sizeof(files) / sizeof(files[0]); i++) {
         if (pa_write(files[i][0], files[i][1]) != 0) {
@@ -180,6 +188,82 @@ TEST(malformed_config_gives_no_aliases) {
     PASS();
 }
 
+/* ── What the tree claims (cortex-indexer T-jnpg) ──────────────── */
+
+/* A relative specifier is always the tree's own. */
+TEST(relative_specifier_is_claimed) {
+    ASSERT_EQ(ensure_pa(), 0);
+    ASSERT_TRUE(ctx_path_aliases_claims(g_pa, "web/app.ts", "./local"));
+    ASSERT_TRUE(ctx_path_aliases_claims(g_pa, "web/app.ts", "../up/thing"));
+    ASSERT_TRUE(ctx_path_aliases_claims(NULL, "web/app.ts", "./local"));
+    PASS();
+}
+
+/* A `paths` pattern of the file's own config claims what it matches, even
+ * where its target does not exist. */
+TEST(paths_pattern_claims_its_specifiers) {
+    ASSERT_EQ(ensure_pa(), 0);
+    ASSERT_TRUE(ctx_path_aliases_claims(g_pa, "web/app.ts", "@x/ui"));
+    ASSERT_TRUE(ctx_path_aliases_claims(g_pa, "web/app.ts", "@x/not-there"));
+    ASSERT_FALSE(ctx_path_aliases_claims(g_pa, "web/plain/app.ts", "@x/ui"));
+    PASS();
+}
+
+/* baseUrl claims a specifier whose first segment names an entry under it,
+ * a directory or a file; not one that names nothing there. */
+TEST(base_url_claims_what_exists_under_it) {
+    ASSERT_EQ(ensure_pa(), 0);
+    ASSERT_TRUE(ctx_path_aliases_claims(g_pa, "web/app.ts", "shared/format"));
+    ASSERT_TRUE(ctx_path_aliases_claims(g_pa, "web/app.ts", "legacy"));
+    ASSERT_FALSE(ctx_path_aliases_claims(g_pa, "web/app.ts", "antd"));
+    ASSERT_FALSE(ctx_path_aliases_claims(g_pa, "web/app.ts", "node:path"));
+    PASS();
+}
+
+/* A package.json in the tree claims its package name and every subpath of
+ * it, from any script file; a dependency under node_modules claims nothing. */
+TEST(workspace_package_claims_its_name) {
+    ASSERT_EQ(ensure_pa(), 0);
+    ASSERT_TRUE(ctx_path_aliases_claims(g_pa, "apps/main.ts", "@acme/kit"));
+    ASSERT_TRUE(ctx_path_aliases_claims(g_pa, "apps/main.ts", "@acme/kit/src/use"));
+    ASSERT_TRUE(ctx_path_aliases_claims(g_pa, "web/app.ts", "acme-cli"));
+    ASSERT_FALSE(ctx_path_aliases_claims(g_pa, "apps/main.ts", "@acme/other"));
+    ASSERT_FALSE(ctx_path_aliases_claims(g_pa, "apps/main.ts", "@acme/ki"));
+    ASSERT_FALSE(ctx_path_aliases_claims(g_pa, "apps/main.ts", "antd"));
+    ASSERT_FALSE(ctx_path_aliases_claims(g_pa, "apps/main.ts", "acme-cli-extra"));
+    PASS();
+}
+
+/* Package specifiers are a JS-family notion: a Python module path is never
+ * judged by them. */
+/* A specifier no npm package can have is an alias some tool resolves (Nuxt's
+ * `~/`, Vite's `@/`, SvelteKit's `$lib`, Node's `#` subpath imports) or a
+ * virtual module: never known to be external, with or without a tsconfig. */
+TEST(specifier_no_package_can_have_is_claimed) {
+    ASSERT_EQ(ensure_pa(), 0);
+    const char *aliases_only[] = {"~/composables/counter", "~~/server/db", "@/components/Card",
+                                  "@@/layers/base",       "#imports",      "#internal/util",
+                                  "$lib/format",           "virtual:pwa-register"};
+    for (size_t i = 0; i < sizeof(aliases_only) / sizeof(aliases_only[0]); i++) {
+        ASSERT_TRUE(ctx_path_aliases_claims(g_pa, "web/app.ts", aliases_only[i]));
+        ASSERT_TRUE(ctx_path_aliases_claims(NULL, "web/app.ts", aliases_only[i]));
+    }
+    /* Package names, scoped or legacy-capitalised, and Node's builtins. */
+    const char *packages[] = {"react", "@scope/pkg/sub", "JSONStream", "lodash.debounce",
+                              "node:path", "fs"};
+    for (size_t i = 0; i < sizeof(packages) / sizeof(packages[0]); i++) {
+        ASSERT_FALSE(ctx_path_aliases_claims(NULL, "web/app.ts", packages[i]));
+    }
+    PASS();
+}
+
+TEST(non_script_file_claims_only_relative_specifiers) {
+    ASSERT_EQ(ensure_pa(), 0);
+    ASSERT_FALSE(ctx_path_aliases_claims(g_pa, "web/tool.py", "@acme/kit"));
+    ASSERT_TRUE(ctx_path_aliases_claims(g_pa, "web/tool.py", "./sibling"));
+    PASS();
+}
+
 SUITE(path_alias) {
     RUN_TEST(exact_pattern_beats_a_wildcard_that_also_matches);
     RUN_TEST(longest_wildcard_prefix_wins);
@@ -190,6 +274,12 @@ SUITE(path_alias) {
     RUN_TEST(self_extending_config_loads);
     RUN_TEST(config_with_byte_order_mark_loads);
     RUN_TEST(malformed_config_gives_no_aliases);
+    RUN_TEST(relative_specifier_is_claimed);
+    RUN_TEST(paths_pattern_claims_its_specifiers);
+    RUN_TEST(base_url_claims_what_exists_under_it);
+    RUN_TEST(workspace_package_claims_its_name);
+    RUN_TEST(specifier_no_package_can_have_is_claimed);
+    RUN_TEST(non_script_file_claims_only_relative_specifiers);
     ctx_path_aliases_free(g_pa);
     g_pa = NULL;
     g_pa_tried = false;

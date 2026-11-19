@@ -142,38 +142,112 @@ const ctx_gbuf_node_t *ctx_pipeline_import_target(const ctx_pipeline_ctx_t *ctx,
     return node ? node : it_module_node(ctx, module_path, ts_rules);
 }
 
-void ctx_pipeline_import_map_from_result(const ctx_pipeline_ctx_t *ctx, const char *source_rel,
-                                         const CtxFileResult *result, const char ***out_keys,
-                                         const char ***out_vals, int *out_count) {
+/* Whether some import of local_name in the file is in-tree. */
+static bool it_name_in_tree(const CtxFileResult *result, const bool *in_tree, const char *name) {
+    for (int i = 0; i < result->imports.count; i++) {
+        const char *other = result->imports.items[i].local_name;
+        if (in_tree[i] && other && strcmp(other, name) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/* Whether names[0..count) already holds name. */
+static bool it_listed(const char *const *names, int count, const char *name) {
+    for (int i = 0; i < count; i++) {
+        if (strcmp(names[i], name) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/* The local names a script file imports only from specifiers nothing in the
+ * tree claims, into a fresh array of names borrowed from result. */
+static void it_collect_externals(const ctx_pipeline_ctx_t *ctx, const char *source_rel,
+                                 const CtxFileResult *result, const bool *in_tree,
+                                 const char ***out_names, int *out_count) {
+    *out_names = NULL;
+    *out_count = 0;
+    if (!ctx_path_aliases_is_script(source_rel)) {
+        return;
+    }
+    const char **names = calloc((size_t)result->imports.count, sizeof(const char *));
+    if (!names) {
+        return;
+    }
+    int count = 0;
+    for (int i = 0; i < result->imports.count; i++) {
+        const char *name = result->imports.items[i].local_name;
+        if (in_tree[i] || !name || !name[0] || it_listed(names, count, name) ||
+            it_name_in_tree(result, in_tree, name)) {
+            continue;
+        }
+        names[count++] = name;
+    }
+    if (count == 0) {
+        free((void *)names);
+        return;
+    }
+    *out_names = names;
+    *out_count = count;
+}
+
+void ctx_pipeline_import_map_with_externals(const ctx_pipeline_ctx_t *ctx, const char *source_rel,
+                                            const CtxFileResult *result, const char ***out_keys,
+                                            const char ***out_vals, int *out_count,
+                                            const char ***out_externals,
+                                            int *out_external_count) {
     *out_keys = NULL;
     *out_vals = NULL;
     *out_count = 0;
+    if (out_externals) {
+        *out_externals = NULL;
+        *out_external_count = 0;
+    }
     if (!result || result->imports.count <= 0) {
         return;
     }
     const char **keys = calloc((size_t)result->imports.count, sizeof(const char *));
     const char **vals = calloc((size_t)result->imports.count, sizeof(const char *));
-    if (!keys || !vals) {
+    bool *in_tree = calloc((size_t)result->imports.count, sizeof(bool));
+    if (!keys || !vals || !in_tree) {
         free((void *)keys);
         free((void *)vals);
+        free(in_tree);
         return;
     }
     int count = 0;
     for (int i = 0; i < result->imports.count; i++) {
         const CtxImport *imp = &result->imports.items[i];
         if (!imp->local_name || !imp->local_name[0] || !imp->module_path) {
+            in_tree[i] = true; /* nothing to say about it: never an external name */
             continue;
         }
         const ctx_gbuf_node_t *target = ctx_pipeline_import_target(ctx, source_rel,
                                                                    imp->module_path);
         if (!target) {
+            in_tree[i] = ctx_path_aliases_claims(ctx->path_aliases, source_rel, imp->module_path);
             continue;
         }
+        in_tree[i] = true;
         keys[count] = strdup(imp->local_name);
         vals[count] = target->qualified_name; /* borrowed from ctx->gbuf */
         count++;
     }
+    if (out_externals) {
+        it_collect_externals(ctx, source_rel, result, in_tree, out_externals, out_external_count);
+    }
+    free(in_tree);
     *out_keys = keys;
     *out_vals = vals;
     *out_count = count;
+}
+
+void ctx_pipeline_import_map_from_result(const ctx_pipeline_ctx_t *ctx, const char *source_rel,
+                                         const CtxFileResult *result, const char ***out_keys,
+                                         const char ***out_vals, int *out_count) {
+    ctx_pipeline_import_map_with_externals(ctx, source_rel, result, out_keys, out_vals, out_count,
+                                           NULL, NULL);
 }

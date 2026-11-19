@@ -45,6 +45,54 @@ static int setup_import_repo(void) {
         return -1;
     }
     const char *const files[][2] = {
+        /* Project functions named like what packages export (T-jnpg). */
+        {"lib/render.ts", "export function render(): void {}\n"},
+        {"lib/resolve.ts", "export function resolve(): string {\n"
+                           "  return '';\n"
+                           "}\n"},
+        {"lib/dayjs.ts", "export function dayjs(): number {\n"
+                         "  return 0;\n"
+                         "}\n"},
+        {"lib/Spin.tsx", "export function Spin() {\n"
+                         "  return null;\n"
+                         "}\n"},
+        /* Callers that import those names from packages: npm, a Node builtin,
+         * a default import, and a JSX component. */
+        {"ui_tests/card.test.ts", "import { render } from '@testing-library/react';\n"
+                                  "import { resolve } from 'node:path';\n"
+                                  "import dayjs from 'dayjs';\n"
+                                  "\n"
+                                  "export function rendersCard(): void {\n"
+                                  "  render();\n"
+                                  "  resolve();\n"
+                                  "  dayjs();\n"
+                                  "}\n"},
+        {"ui_tests/loading.tsx", "import { Spin } from 'antd';\n"
+                                 "\n"
+                                 "export function Loading() {\n"
+                                 "  return <Spin />;\n"
+                                 "}\n"},
+        /* A workspace package the tree declares, imported by its name with no
+         * alias for it: its code, so the guess stays. */
+        {"packages/kit/package.json", "{ \"name\": \"@acme/kit\" }\n"},
+        {"packages/kit/src/use_kit.ts", "export function useKit(): void {}\n"},
+        {"apps/start.ts", "import { useKit } from '@acme/kit';\n"
+                          "\n"
+                          "export function startsApp(): void {\n"
+                          "  useKit();\n"
+                          "}\n"},
+        /* Aliases only a framework resolves (Nuxt's `~/`, its `#imports`),
+         * with no tsconfig to say so: no package has such a name, so the
+         * guess stays. */
+        {"composables/counter.ts", "export function useCounter(): void {}\n"},
+        {"composables/theme.ts", "export function useTheme(): void {}\n"},
+        {"pages/count.ts", "import { useCounter } from '~/composables/counter';\n"
+                           "import { useTheme } from '#imports';\n"
+                           "\n"
+                           "export function countsUp(): void {\n"
+                           "  useCounter();\n"
+                           "  useTheme();\n"
+                           "}\n"},
         /* The function every caller means. */
         {"util/date.ts", "export function formatDate(d: string): string {\n"
                          "  return d;\n"
@@ -831,6 +879,39 @@ static void import_resolution_teardown(void) {
     g_alias_failed = false;
 }
 
+/* A bare call to a name the file imports from a package is the package's,
+ * never a project function guessed by name: npm, a Node builtin, a default
+ * import, a JSX component (T-jnpg). */
+TEST(call_to_a_package_import_is_not_guessed_onto_the_project) {
+    BOTH_MODES(!pf_find_call(g_seq, "rendersCard", "lib.render.render"),
+               !pf_find_call(g_par, "rendersCard", "lib.render.render"));
+    BOTH_MODES(!pf_find_call(g_seq, "rendersCard", "lib.resolve.resolve"),
+               !pf_find_call(g_par, "rendersCard", "lib.resolve.resolve"));
+    BOTH_MODES(!pf_find_call(g_seq, "rendersCard", "lib.dayjs.dayjs"),
+               !pf_find_call(g_par, "rendersCard", "lib.dayjs.dayjs"));
+    BOTH_MODES(!pf_find_call(g_seq, "Loading", "lib.Spin.Spin"),
+               !pf_find_call(g_par, "Loading", "lib.Spin.Spin"));
+    PASS();
+}
+
+/* A package the tree itself declares is project code: a call into it by its
+ * package name keeps its edge, guessed or not. */
+TEST(call_to_a_workspace_package_import_is_kept) {
+    BOTH_MODES(pf_find_call(g_seq, "startsApp", "kit.src.use_kit.useKit") != NULL,
+               pf_find_call(g_par, "startsApp", "kit.src.use_kit.useKit") != NULL);
+    PASS();
+}
+
+/* `~/composables/counter` and `#imports` cannot be npm packages: the guess
+ * onto the project's own composable stays. */
+TEST(call_through_a_framework_alias_is_kept) {
+    BOTH_MODES(pf_find_call(g_seq, "countsUp", "composables.counter.useCounter") != NULL,
+               pf_find_call(g_par, "countsUp", "composables.counter.useCounter") != NULL);
+    BOTH_MODES(pf_find_call(g_seq, "countsUp", "composables.theme.useTheme") != NULL,
+               pf_find_call(g_par, "countsUp", "composables.theme.useTheme") != NULL);
+    PASS();
+}
+
 SUITE(import_resolution) {
     RUN_TEST(bare_imported_call_resolves_through_import_map);
     RUN_TEST(member_of_imported_class_resolves_exactly);
@@ -861,5 +942,8 @@ SUITE(import_resolution) {
     RUN_TEST(alias_through_two_extends_hops);
     RUN_TEST(child_paths_resolve_against_the_inherited_base_url);
     RUN_TEST(base_url_and_paths_relative_to_it);
+    RUN_TEST(call_to_a_package_import_is_not_guessed_onto_the_project);
+    RUN_TEST(call_to_a_workspace_package_import_is_kept);
+    RUN_TEST(call_through_a_framework_alias_is_kept);
     import_resolution_teardown();
 }

@@ -872,6 +872,28 @@ bool ctx_registry_admits_member_call(const ctx_registry_t *r, CtxLanguage lang,
     return root_is_imported(callee_name, root_len, imports);
 }
 
+/* ── Bare calls to package imports (T-jnpg) ──────────────────────── */
+
+bool ctx_registry_admits_bare_call(CtxLanguage lang, const char *callee_name,
+                                   const ctx_resolution_t *res, const char *const *external_names,
+                                   int external_count) {
+    if (!lang_has_member_call_rule(lang) || !callee_name || !res || !external_names ||
+        external_count <= 0) {
+        return true;
+    }
+    if (!binds_by_name_alone(res->strategy)) {
+        return true; /* the import map and the file itself are no guess */
+    }
+    /* An exact match on the whole callee: a member call (`render.x()`) never
+     * equals an imported local name, and has its own rule. */
+    for (int i = 0; i < external_count; i++) {
+        if (external_names[i] && strcmp(external_names[i], callee_name) == 0) {
+            return false;
+        }
+    }
+    return true;
+}
+
 /* ── Fuzzy Resolve ──────────────────────────────────────────────── */
 
 /* Filter candidates by import reachability. Returns count of reachable. */
