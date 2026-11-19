@@ -722,6 +722,43 @@ TEST(gbuf_qn_collision_ts_module_beats_js_module) {
     PASS();
 }
 
+/* Two definitions of one name in same-stem JS/TS-family files (a package
+ * that ships foo.ts and foo.cjs, or index.d.ts and index.d.cts): the symbol
+ * stays with the file whose module an import resolves to, by TypeScript's
+ * extension order, however the paths sort. */
+TEST(gbuf_qn_collision_symbol_follows_its_modules_extension_order) {
+    qn_claim_t ts_fn = {"Function", "src/foo.ts"};
+    qn_claim_t cjs_fn = {"Function", "src/foo.cjs"};
+    ASSERT_EQ(qn_survivor_is(cjs_fn, ts_fn, ts_fn), 0);
+
+    qn_claim_t mjs_fn = {"Function", "src/foo.mjs"};
+    ASSERT_EQ(qn_survivor_is(mjs_fn, ts_fn, ts_fn), 0);
+
+    qn_claim_t js_fn = {"Function", "src/foo.js"};
+    ASSERT_EQ(qn_survivor_is(cjs_fn, js_fn, js_fn), 0);
+
+    qn_claim_t tsx_fn = {"Function", "ui/Card.tsx"};
+    qn_claim_t mts_fn = {"Function", "ui/Card.mts"};
+    ASSERT_EQ(qn_survivor_is(mts_fn, tsx_fn, tsx_fn), 0);
+
+    qn_claim_t dts = {"Interface", "types/index.d.ts"};
+    qn_claim_t dcts = {"Interface", "types/index.d.cts"};
+    ASSERT_EQ(qn_survivor_is(dcts, dts, dts), 0);
+    PASS();
+}
+
+/* The extension order only settles a tie between two JS/TS-family files: a
+ * symbol against one from another language keeps the file_path order, on
+ * either side of it. */
+TEST(gbuf_qn_collision_across_languages_keeps_path_order) {
+    qn_claim_t py_fn = {"Function", "lib/parse.py"};
+    qn_claim_t ts_fn = {"Function", "lib/parse.ts"};
+    ASSERT_EQ(qn_survivor_is(ts_fn, py_fn, py_fn), 0);
+    qn_claim_t zig_fn = {"Function", "lib/parse.zig"};
+    ASSERT_EQ(qn_survivor_is(zig_fn, ts_fn, ts_fn), 0);
+    PASS();
+}
+
 /* Collisions that involve no JS/TS module keep the file_path order: a Go
  * package is its directory, and a stylesheet pair has no import to honour. */
 TEST(gbuf_qn_collision_without_a_js_module_keeps_path_order) {
@@ -1126,6 +1163,8 @@ SUITE(graph_buffer) {
     RUN_TEST(gbuf_qn_collision_module_beats_the_folder_beside_it);
     RUN_TEST(gbuf_qn_collision_module_beats_a_symbol_from_another_file);
     RUN_TEST(gbuf_qn_collision_ts_module_beats_js_module);
+    RUN_TEST(gbuf_qn_collision_symbol_follows_its_modules_extension_order);
+    RUN_TEST(gbuf_qn_collision_across_languages_keeps_path_order);
     RUN_TEST(gbuf_qn_collision_without_a_js_module_keeps_path_order);
     RUN_TEST(gbuf_qn_collision_code_beats_a_doc_heading);
     RUN_TEST(gbuf_qn_collision_between_doc_headings_keeps_path_order);

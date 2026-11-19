@@ -78,9 +78,13 @@ bool ctx_is_test_path(const char *path) {
         return true;
     }
 
-    /* .test.<ext> / .spec.<ext> pattern (JS/TS/TSX) */
+    /* .test.<ext> / .spec.<ext> pattern (JS/TS/TSX, and the .mjs/.cjs/.mts/.cts
+     * module-system variants) */
     if (strstr(path, ".test.ts") || strstr(path, ".spec.ts") || strstr(path, ".test.js") ||
-        strstr(path, ".spec.js") || strstr(path, ".test.tsx") || strstr(path, ".spec.tsx")) {
+        strstr(path, ".spec.js") || strstr(path, ".test.tsx") || strstr(path, ".spec.tsx") ||
+        strstr(path, ".test.mjs") || strstr(path, ".spec.mjs") || strstr(path, ".test.cjs") ||
+        strstr(path, ".spec.cjs") || strstr(path, ".test.mts") || strstr(path, ".spec.mts") ||
+        strstr(path, ".test.cts") || strstr(path, ".spec.cts")) {
         return true;
     }
 

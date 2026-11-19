@@ -293,6 +293,21 @@ static int setup_import_repo(void) {
                              "  clockTick();\n"
                              "  legacyTick();\n"
                              "}\n"},
+        /* A package that ships one module twice: TypeScript source and a
+         * CommonJS build beside it. `./pick` is pick.ts, and "pick.cjs"
+         * sorts first. */
+        {"dual/pick.ts", "export function pick(): number {\n"
+                         "  return 1;\n"
+                         "}\n"},
+        {"dual/pick.cjs", "function pick() {\n"
+                          "  return 2;\n"
+                          "}\n"
+                          "module.exports = { pick };\n"},
+        {"dual/use_pick.ts", "import { pick } from './pick';\n"
+                             "\n"
+                             "export function choosesPick(): number {\n"
+                             "  return pick();\n"
+                             "}\n"},
     };
     for (size_t i = 0; i < sizeof(files) / sizeof(files[0]); i++) {
         if (ir_write(files[i][0], files[i][1]) != 0) {
@@ -811,8 +826,6 @@ TEST(barrel_member_call_does_not_claim_another_owners_method) {
     PASS();
 }
 
-/* The direct hit is for bare callees only: `client.get()` must not collapse
- * onto the imported `client` itself (upstream afcce2d4). */
 /* .mjs/.cjs files are JavaScript and .mts/.cts TypeScript: their definitions
  * are in the graph. */
 TEST(module_system_variants_are_indexed) {
@@ -844,6 +857,18 @@ TEST(import_of_a_module_system_variant_resolves) {
     PASS();
 }
 
+/* A CommonJS build beside its TypeScript source does not take the source's
+ * definitions: `pick` stays in pick.ts, where `./pick` resolves. */
+TEST(sibling_build_does_not_take_the_sources_definitions) {
+    BOTH_MODES(qn_held_by(g_seq, "ir-test.dual.pick.pick", "Function", "dual/pick.ts"),
+               qn_held_by(g_par, "ir-test.dual.pick.pick", "Function", "dual/pick.ts"));
+    BOTH_MODES(pf_call_resolved_by(g_seq, "choosesPick", "dual.pick.pick", "import_map"),
+               pf_call_resolved_by(g_par, "choosesPick", "dual.pick.pick", "import_map"));
+    PASS();
+}
+
+/* The direct hit is for bare callees only: `client.get()` must not collapse
+ * onto the imported `client` itself (upstream afcce2d4). */
 TEST(member_call_on_imported_name_is_not_the_name_itself) {
     BOTH_MODES(pf_has_def(g_seq, "uses_client"), pf_has_def(g_par, "uses_client"));
     BOTH_MODES(!pf_find_call(g_seq, "uses_client", "util.client.client"),
@@ -909,6 +934,7 @@ SUITE(import_resolution) {
     RUN_TEST(member_call_on_imported_name_is_not_the_name_itself);
     RUN_TEST(module_system_variants_are_indexed);
     RUN_TEST(import_of_a_module_system_variant_resolves);
+    RUN_TEST(sibling_build_does_not_take_the_sources_definitions);
     RUN_TEST(alias_from_extended_base_resolves_into_the_package);
     RUN_TEST(wildcard_alias_resolves_to_the_module);
     RUN_TEST(alias_through_two_extends_hops);

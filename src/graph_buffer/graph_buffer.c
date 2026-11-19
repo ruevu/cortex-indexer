@@ -549,6 +549,25 @@ static const char *const IMPORTABLE_EXTS[] = {"ts",  "tsx", "js",  "jsx", "mts",
                                               "cts", "mjs", "cjs", "vue", "svelte"};
 enum { IMPORTABLE_EXT_COUNT = sizeof(IMPORTABLE_EXTS) / sizeof(IMPORTABLE_EXTS[0]) };
 
+/* The position of file_path's extension in IMPORTABLE_EXTS, or -1. */
+static int importable_ext_index(const char *file_path) {
+    if (!file_path) {
+        return -1;
+    }
+    const char *slash = strrchr(file_path, '/');
+    const char *base = slash ? slash + 1 : file_path;
+    const char *dot = strrchr(base, '.');
+    if (!dot) {
+        return -1;
+    }
+    for (int i = 0; i < IMPORTABLE_EXT_COUNT; i++) {
+        if (strcmp(dot + 1, IMPORTABLE_EXTS[i]) == 0) {
+            return i;
+        }
+    }
+    return -1;
+}
+
 /* Where a claim stands when it collides on a qualified name. Lower wins:
  *   - a Module from a JS/TS-family file: its extension's position in
  *     IMPORTABLE_EXTS;
@@ -561,21 +580,11 @@ static int qn_claim_rank(const char *label, const char *file_path) {
     if (label && strcmp(label, "Section") == 0) {
         return IMPORTABLE_EXT_COUNT + 1;
     }
-    if (!label || !file_path || strcmp(label, "Module") != 0) {
+    if (!label || strcmp(label, "Module") != 0) {
         return IMPORTABLE_EXT_COUNT;
     }
-    const char *slash = strrchr(file_path, '/');
-    const char *base = slash ? slash + 1 : file_path;
-    const char *dot = strrchr(base, '.');
-    if (!dot) {
-        return IMPORTABLE_EXT_COUNT;
-    }
-    for (int i = 0; i < IMPORTABLE_EXT_COUNT; i++) {
-        if (strcmp(dot + 1, IMPORTABLE_EXTS[i]) == 0) {
-            return i;
-        }
-    }
-    return IMPORTABLE_EXT_COUNT;
+    int ext = importable_ext_index(file_path);
+    return ext >= 0 ? ext : IMPORTABLE_EXT_COUNT;
 }
 
 /* True when a claim (`incoming_label`, `incoming_file`) must NOT take over a
@@ -600,6 +609,13 @@ static int qn_claim_rank(const char *label, const char *file_path) {
  * A heading loses to every other claim. Nothing imports or calls one, so when
  * it keeps the qn every call to the function it documents lands on the docs.
  *
+ * Two other claims from JS/TS-family files of different extensions also go
+ * by TypeScript's extension order: same-stem files (foo.ts and foo.cjs, a
+ * source and its CommonJS build; index.d.ts and index.d.cts) define the same
+ * names, and a symbol belongs with the file whose module an import resolves
+ * to. By path order alone, "foo.cjs" sorts first and would take foo.ts's
+ * definitions and every call into them.
+ *
  * Everything else falls back to a total order on file_path, which keeps the
  * survivor a property of the repository rather than of the thread schedule:
  * files reach workers dynamically, and last-write-wins once made the same tree
@@ -622,6 +638,13 @@ static bool qn_claim_loses(const ctx_gbuf_node_t *holder, const char *incoming_l
     int incoming_rank = qn_claim_rank(incoming_label, incoming_file);
     if (holder_rank != incoming_rank) {
         return holder_rank < incoming_rank;
+    }
+    if (holder_rank == IMPORTABLE_EXT_COUNT) {
+        int holder_ext = importable_ext_index(holder->file_path);
+        int incoming_ext = importable_ext_index(incoming_file);
+        if (holder_ext >= 0 && incoming_ext >= 0 && holder_ext != incoming_ext) {
+            return holder_ext < incoming_ext;
+        }
     }
     return by_path < 0;
 }

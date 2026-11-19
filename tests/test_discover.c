@@ -22,6 +22,11 @@ TEST(skip_cortex_state) {
     ASSERT_TRUE(ctx_should_skip_dir(".cortex", CTX_MODE_FULL));
     PASS();
 }
+TEST(skip_agent_tool_state) {
+    ASSERT_TRUE(ctx_should_skip_dir(".superpowers", CTX_MODE_FULL));
+    ASSERT_TRUE(ctx_should_skip_dir(".playwright-mcp", CTX_MODE_FULL));
+    PASS();
+}
 TEST(skip_pycache) {
     ASSERT_TRUE(ctx_should_skip_dir("__pycache__", CTX_MODE_FULL));
     PASS();
@@ -181,6 +186,11 @@ TEST(suffix_fast_pdf) {
     ASSERT_TRUE(ctx_has_ignored_suffix("manual.pdf", CTX_MODE_FAST));
     PASS();
 }
+TEST(suffix_fast_minified_module_variants) {
+    ASSERT_TRUE(ctx_has_ignored_suffix("app.min.mjs", CTX_MODE_FAST));
+    ASSERT_TRUE(ctx_has_ignored_suffix("app.min.cjs", CTX_MODE_FAST));
+    PASS();
+}
 TEST(suffix_fast_mp3) {
     ASSERT_TRUE(ctx_has_ignored_suffix("sound.mp3", CTX_MODE_FAST));
     PASS();
@@ -223,6 +233,11 @@ TEST(fn_no_skip_license_full) {
 
 TEST(pattern_dts) {
     ASSERT_TRUE(ctx_matches_fast_pattern("types.d.ts", CTX_MODE_FAST));
+    PASS();
+}
+TEST(pattern_dts_module_system_variants) {
+    ASSERT_TRUE(ctx_matches_fast_pattern("types.d.mts", CTX_MODE_FAST));
+    ASSERT_TRUE(ctx_matches_fast_pattern("types.d.cts", CTX_MODE_FAST));
     PASS();
 }
 TEST(pattern_pbgo) {
@@ -320,6 +335,12 @@ TEST(discover_skips_cortex_files) {
     th_write_file(TH_PATH(base, ".cortex/staleness.json"), "{\"swept\":1}\n");
     th_write_file(TH_PATH(base, ".cortex/quality.json"), "{\"verdict\":\"ok\"}\n");
     th_write_file(TH_PATH(base, "cortex.json"), "{\"repoId\":\"x\"}\n");
+    /* A nested checkout's state, and agent tools' scratch: plan ledgers and
+     * page snapshots. A linked worktree reads no root .gitignore (T-0fy2). */
+    th_write_file(TH_PATH(base, "pkg/.cortex/staleness.json"), "{\"swept\":1}\n");
+    th_write_file(TH_PATH(base, "pkg/cortex.json"), "{\"repoId\":\"y\"}\n");
+    th_write_file(TH_PATH(base, ".superpowers/sdd/plan/progress.md"), "# ledger\n");
+    th_write_file(TH_PATH(base, ".playwright-mcp/page.yml"), "- button: Save\n");
     th_write_file(TH_PATH(base, "src/main.go"), "package main\n");
 
     ctx_discover_opts_t opts = {0};
@@ -740,6 +761,7 @@ SUITE(discover) {
     RUN_TEST(skip_git);
     RUN_TEST(skip_node_modules);
     RUN_TEST(skip_cortex_state);
+    RUN_TEST(skip_agent_tool_state);
     RUN_TEST(skip_pycache);
     RUN_TEST(skip_venv);
     RUN_TEST(skip_dist);
@@ -783,6 +805,7 @@ SUITE(discover) {
     RUN_TEST(suffix_c);
     RUN_TEST(suffix_fast_zip);
     RUN_TEST(suffix_fast_pdf);
+    RUN_TEST(suffix_fast_minified_module_variants);
     RUN_TEST(suffix_fast_mp3);
     RUN_TEST(suffix_fast_pem);
 
@@ -796,6 +819,7 @@ SUITE(discover) {
 
     /* Fast mode patterns */
     RUN_TEST(pattern_dts);
+    RUN_TEST(pattern_dts_module_system_variants);
     RUN_TEST(pattern_pbgo);
     RUN_TEST(pattern_pb2py);
     RUN_TEST(pattern_mock);

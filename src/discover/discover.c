@@ -42,6 +42,8 @@ static const char *ALWAYS_SKIP_DIRS[] = {
     ".vercel", ".netlify",
     /* Cortex's own state: its graph, staleness and quality reports, logs */
     ".cortex",
+    /* Agent tools' scratch: plan ledgers and briefs, browser page snapshots */
+    ".superpowers", ".playwright-mcp",
     /* Misc */
     ".qdrant_code_embeddings", ".tmp", "vendor", NULL};
 
@@ -63,12 +65,13 @@ static const char *ALWAYS_IGNORED_SUFFIXES[] = {
     ".sqlite", ".sqlite3", ".woff", ".woff2", ".ttf", ".eot", ".otf", NULL};
 
 static const char *FAST_IGNORED_SUFFIXES[] = {
-    ".zip", ".tar",  ".gz",       ".bz2",  ".xz",  ".rar",    ".7z",      ".jar",
-    ".war", ".ear",  ".mp3",      ".mp4",  ".avi", ".mov",    ".wav",     ".flac",
-    ".ogg", ".mkv",  ".webm",     ".pdf",  ".doc", ".docx",   ".xls",     ".xlsx",
-    ".ppt", ".pptx", ".odt",      ".ods",  ".map", ".min.js", ".min.css", ".pem",
-    ".crt", ".key",  ".cer",      ".p12",  ".pb",  ".avro",   ".parquet", ".beam",
-    ".elc", ".rlib", ".coverage", ".prof", ".out", ".patch",  ".diff",    NULL};
+    ".zip",     ".tar",     ".gz",      ".bz2",     ".xz",       ".rar",  ".7z",  ".jar",
+    ".war",     ".ear",     ".mp3",     ".mp4",     ".avi",      ".mov",  ".wav", ".flac",
+    ".ogg",     ".mkv",     ".webm",    ".pdf",     ".doc",      ".docx", ".xls", ".xlsx",
+    ".ppt",     ".pptx",    ".odt",     ".ods",     ".map",      ".pem",  ".crt", ".key",
+    ".min.js",  ".min.mjs", ".min.cjs", ".min.css", ".cer",      ".p12",  ".pb",  ".avro",
+    ".parquet", ".beam",    ".elc",     ".rlib",    ".coverage", ".prof", ".out", ".patch",
+    ".diff",    NULL};
 
 /* ── Fast-mode skip filenames ────────────────────────────────────── */
 
@@ -83,10 +86,11 @@ static const char *FAST_SKIP_FILENAMES[] = {
 
 /* ── Fast-mode substring patterns ────────────────────────────────── */
 
-static const char *FAST_PATTERNS[] = {".d.ts",      ".bundle.", ".chunk.", ".generated.",
-                                      ".pb.go",     "_pb2.py",  ".pb2.py", "_grpc.pb.go",
-                                      "_string.go", "mock_",    "_mock.",  "_test_helpers.",
-                                      ".stories.",  ".spec.",   ".test.",  NULL};
+static const char *FAST_PATTERNS[] = {
+    ".d.ts",     ".d.mts",  ".d.cts", ".bundle.",    ".chunk.",    ".generated.",
+    ".pb.go",    "_pb2.py", ".pb2.py", "_grpc.pb.go", "_string.go", "mock_",
+    "_mock.",    "_test_helpers.",    ".stories.",   ".spec.",     ".test.",
+    NULL};
 
 /* ── Ignored JSON filenames ──────────────────────────────────────── */
 
