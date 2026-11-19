@@ -153,51 +153,57 @@ static bool it_name_in_tree(const CtxFileResult *result, const bool *in_tree, co
     return false;
 }
 
-/* Whether names[0..count) already holds name. */
-static bool it_listed(const char *const *names, int count, const char *name) {
+/* Whether externals[0..count) already holds the pair. */
+static bool it_listed(const ctx_external_import_t *externals, int count, const char *name,
+                      const char *specifier) {
     for (int i = 0; i < count; i++) {
-        if (strcmp(names[i], name) == 0) {
+        if (strcmp(externals[i].name, name) == 0 &&
+            strcmp(externals[i].specifier, specifier) == 0) {
             return true;
         }
     }
     return false;
 }
 
-/* The local names a script file imports only from specifiers nothing in the
- * tree claims, into a fresh array of names borrowed from result. */
+/* What a script file imports only from specifiers nothing in the tree
+ * claims, each name with its specifier, into a fresh array of strings
+ * borrowed from result. */
 static void it_collect_externals(const ctx_pipeline_ctx_t *ctx, const char *source_rel,
                                  const CtxFileResult *result, const bool *in_tree,
-                                 const char ***out_names, int *out_count) {
-    *out_names = NULL;
+                                 ctx_external_import_t **out_externals, int *out_count) {
+    *out_externals = NULL;
     *out_count = 0;
     if (!ctx_path_aliases_is_script(source_rel)) {
         return;
     }
-    const char **names = calloc((size_t)result->imports.count, sizeof(const char *));
-    if (!names) {
+    ctx_external_import_t *externals =
+        calloc((size_t)result->imports.count, sizeof(ctx_external_import_t));
+    if (!externals) {
         return;
     }
     int count = 0;
     for (int i = 0; i < result->imports.count; i++) {
         const char *name = result->imports.items[i].local_name;
-        if (in_tree[i] || !name || !name[0] || it_listed(names, count, name) ||
+        const char *specifier = result->imports.items[i].module_path;
+        if (in_tree[i] || !name || !name[0] || !specifier ||
+            it_listed(externals, count, name, specifier) ||
             it_name_in_tree(result, in_tree, name)) {
             continue;
         }
-        names[count++] = name;
+        externals[count++] = (ctx_external_import_t){name, specifier};
     }
     if (count == 0) {
-        free((void *)names);
+        free(externals);
         return;
     }
-    *out_names = names;
+    *out_externals = externals;
     *out_count = count;
 }
 
 void ctx_pipeline_import_map_with_externals(const ctx_pipeline_ctx_t *ctx, const char *source_rel,
                                             const CtxFileResult *result, const char ***out_keys,
                                             const char ***out_vals, int *out_count,
-                                            const char ***out_externals,
+                                            ctx_external_import_t **out_externals,
                                             int *out_external_count) {
     *out_keys = NULL;
     *out_vals = NULL;

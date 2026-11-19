@@ -36,6 +36,7 @@ enum {
     PA_PATH_MAX = 1024,
     PA_MAX_PACKAGES = 4096,        /* workspace package names kept from one repo walk */
     PA_MAX_BASE_ENTRIES = 4096,    /* entries listed under one baseUrl */
+    PA_MAX_ALIAS_KEYS = 4096,      /* `paths` keys kept from configs no scope reads */
 };
 
 typedef struct {
@@ -69,12 +70,15 @@ typedef struct {
     pa_patterns_t paths;
     char *base_url;
     pa_names_t base_entries; /* what baseUrl reaches: directory names, file stems */
+    bool base_truncated;     /* base_entries stopped at its cap */
 } pa_scope_t;
 
 struct ctx_path_aliases {
     pa_scope_t *scopes; /* deepest directory first */
     int count;
-    pa_names_t packages; /* `name` of every package.json in the tree */
+    pa_names_t packages;   /* package.json names, and keys of dependencies in the tree */
+    pa_names_t alias_keys; /* `paths` keys of the configs no scope reads */
+    bool incomplete;       /* the walk stopped at a cap: claims every package */
 };
 
 /* ── Paths ───────────────────────────────────────────────────────── */
@@ -396,41 +400,109 @@ typedef struct {
     ctx_gitignore_t *gitignore;
     char **configs; /* repo-relative paths */
     int count;
-    pa_names_t packages; /* capacity PA_MAX_PACKAGES */
+    pa_names_t packages;   /* capacity PA_MAX_PACKAGES */
+    pa_names_t alias_keys; /* capacity PA_MAX_ALIAS_KEYS */
+    bool truncated;        /* something the walk would have kept was left out */
 } pa_walk_t;
 
-/* The `name` a package.json in rel_dir declares, kept in w->packages. A
- * workspace's own packages are what an import of a package name can mean
- * inside the tree; node_modules is never walked, so a dependency's manifest
- * adds nothing. */
-static void pa_collect_package(pa_walk_t *w, const char *rel_dir) {
-    if (!w->packages.items || w->packages.count >= PA_MAX_PACKAGES) {
+/* A copy of s into ns, which holds at most cap. What does not fit truncates
+ * the walk. */
+static void pa_walk_keep(pa_walk_t *w, pa_names_t *ns, int cap, const char *s) {
+    char *copy = ns->items && ns->count < cap ? strdup(s) : NULL;
+    if (!copy) {
+        w->truncated = true;
         return;
     }
+    ns->items[ns->count++] = copy;
+}
+
+/* What a package.json in rel_dir lets the tree import by a package name,
+ * kept in w->packages: its `name`, a workspace package's; and each
+ * dependency key whose version points into the tree (`file:`, `link:`,
+ * `portal:`, `workspace:`), which the code imports by that key whatever the
+ * package there calls itself. node_modules is never walked, so a
+ * dependency's own manifest adds nothing. */
+static void pa_collect_package(pa_walk_t *w, const char *rel_dir) {
     char *rel = pa_join(rel_dir, "package.json");
     yyjson_doc *doc = rel && pa_exists(w->repo, rel) ? pa_read_json(w->repo, rel) : NULL;
     free(rel);
     if (!doc) {
         return;
     }
-    const char *name = yyjson_get_str(yyjson_obj_get(yyjson_doc_get_root(doc), "name"));
+    yyjson_val *root = yyjson_doc_get_root(doc);
+    const char *name = yyjson_get_str(yyjson_obj_get(root, "name"));
     if (name && name[0]) {
-        w->packages.items[w->packages.count++] = strdup(name);
+        pa_walk_keep(w, &w->packages, PA_MAX_PACKAGES, name);
+    }
+    static const char *const fields[] = {"dependencies", "devDependencies", "peerDependencies",
+                                         "optionalDependencies"};
+    static const char *const local[] = {"file:", "link:", "portal:", "workspace:"};
+    for (size_t f = 0; f < sizeof(fields) / sizeof(fields[0]); f++) {
+        yyjson_val *deps = yyjson_obj_get(root, fields[f]);
+        yyjson_val *key;
+        yyjson_obj_iter iter = yyjson_obj_iter_with(deps);
+        while (yyjson_is_obj(deps) && (key = yyjson_obj_iter_next(&iter)) != NULL) {
+            const char *dep = yyjson_get_str(key);
+            const char *version = yyjson_get_str(yyjson_obj_iter_get_val(key));
+            for (size_t l = 0; dep && dep[0] && version && l < sizeof(local) / sizeof(local[0]);
+                 l++) {
+                if (strncmp(version, local[l], strlen(local[l])) == 0) {
+                    pa_walk_keep(w, &w->packages, PA_MAX_PACKAGES, dep);
+                    break;
+                }
+            }
+        }
+    }
+    yyjson_doc_free(doc);
+}
+
+/* Whether name is a tsconfig/jsconfig variant: tsconfig.app.json,
+ * jsconfig.base.json, the plain tsconfig.json too. */
+static bool pa_is_config_name(const char *name) {
+    size_t len = strlen(name);
+    return (strncmp(name, "tsconfig.", 9) == 0 || strncmp(name, "jsconfig.", 9) == 0) &&
+           len >= strlen("tsconfig.json") && strcmp(name + len - 5, ".json") == 0;
+}
+
+/* The `paths` keys of a config no scope reads, kept in w->alias_keys. Vite's
+ * template keeps its aliases in tsconfig.app.json, which the project's
+ * tsconfig.json only references; the loader scopes configs by directory, so
+ * these keys are kept for the whole tree, to claim with. A bare "*" key would
+ * claim every package and is left out. */
+static void pa_collect_alias_keys(pa_walk_t *w, const char *rel_dir, const char *name) {
+    char *rel = pa_join(rel_dir, name);
+    yyjson_doc *doc = rel ? pa_read_json(w->repo, rel) : NULL;
+    free(rel);
+    if (!doc) {
+        return;
+    }
+    yyjson_val *opts = yyjson_obj_get(yyjson_doc_get_root(doc), "compilerOptions");
+    yyjson_val *paths = yyjson_obj_get(opts, "paths");
+    yyjson_val *key;
+    yyjson_obj_iter iter = yyjson_obj_iter_with(paths);
+    while (yyjson_is_obj(paths) && (key = yyjson_obj_iter_next(&iter)) != NULL) {
+        const char *pattern = yyjson_get_str(key);
+        if (pattern && pattern[0] && strcmp(pattern, "*") != 0) {
+            pa_walk_keep(w, &w->alias_keys, PA_MAX_ALIAS_KEYS, pattern);
+        }
     }
     yyjson_doc_free(doc);
 }
 
 static void pa_walk(pa_walk_t *w, const char *rel_dir, int depth) {
     if (w->count >= PA_MAX_CONFIGS || depth > PA_MAX_WALK_DEPTH) {
+        w->truncated = true;
         return;
     }
     char abs[PA_PATH_MAX];
     snprintf(abs, sizeof(abs), "%s%s%s", w->repo, rel_dir[0] ? "/" : "", rel_dir);
     static const char *const names[] = {"tsconfig.json", "jsconfig.json"};
+    const char *scoped = NULL; /* the config this directory's scope reads */
     for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
         char *rel = pa_join(rel_dir, names[i]);
         if (rel && pa_exists(w->repo, rel)) {
             w->configs[w->count++] = rel;
+            scoped = names[i];
             break;
         }
         free(rel);
@@ -441,8 +513,18 @@ static void pa_walk(pa_walk_t *w, const char *rel_dir, int depth) {
         return;
     }
     ctx_dirent_t *ent;
-    while ((ent = ctx_readdir(d)) != NULL && w->count < PA_MAX_CONFIGS) {
-        if (!ent->is_dir || ctx_should_skip_dir(ent->name, CTX_MODE_FULL)) {
+    while ((ent = ctx_readdir(d)) != NULL) {
+        if (w->count >= PA_MAX_CONFIGS) {
+            w->truncated = true;
+            break;
+        }
+        if (!ent->is_dir) {
+            if (pa_is_config_name(ent->name) && !(scoped && strcmp(ent->name, scoped) == 0)) {
+                pa_collect_alias_keys(w, rel_dir, ent->name);
+            }
+            continue;
+        }
+        if (ctx_should_skip_dir(ent->name, CTX_MODE_FULL)) {
             continue;
         }
         char *child = pa_join(rel_dir, ent->name);
@@ -464,7 +546,8 @@ static int pa_scope_deeper_first(const void *a, const void *b) {
  * it, a file by its stem as well ("legacy" for legacy.ts). Directories
  * discovery skips (node_modules, dist, ...) and dotted names are left out:
  * a baseUrl of "." must not make every installed package a project path. */
-static pa_names_t pa_list_base_entries(const char *repo, const char *base_url) {
+static pa_names_t pa_list_base_entries(const char *repo, const char *base_url,
+                                       bool *truncated) {
     pa_names_t ns = {0};
     char abs[PA_PATH_MAX];
     int n = snprintf(abs, sizeof(abs), "%s%s%s", repo, base_url[0] ? "/" : "", base_url);
@@ -473,6 +556,7 @@ static pa_names_t pa_list_base_entries(const char *repo, const char *base_url) {
         return ns;
     }
     ns.items = calloc(PA_MAX_BASE_ENTRIES, sizeof(char *));
+    *truncated = ns.items == NULL;
     ctx_dirent_t *ent;
     while (ns.items && (ent = ctx_readdir(d)) != NULL && ns.count < PA_MAX_BASE_ENTRIES - 1) {
         if (ent->name[0] == '.' || (ent->is_dir && ctx_should_skip_dir(ent->name, CTX_MODE_FULL))) {
@@ -485,6 +569,7 @@ static pa_names_t pa_list_base_entries(const char *repo, const char *base_url) {
         }
     }
     if (ns.count >= PA_MAX_BASE_ENTRIES - 1) {
+        *truncated = true;
         ctx_log_warn("path_alias.base_entries.cap_hit", "base_url", base_url);
     }
     ctx_closedir(d);
@@ -506,6 +591,7 @@ void ctx_path_aliases_free(ctx_path_aliases_t *aliases) {
     }
     free(aliases->scopes);
     pa_names_free(&aliases->packages);
+    pa_names_free(&aliases->alias_keys);
     free(aliases);
 }
 
@@ -515,23 +601,26 @@ ctx_path_aliases_t *ctx_path_aliases_load(const char *repo_path) {
     }
     pa_walk_t w = {.repo = repo_path,
                    .configs = calloc(PA_MAX_CONFIGS, sizeof(char *)),
-                   .packages = {.items = calloc(PA_MAX_PACKAGES, sizeof(char *))}};
+                   .packages = {.items = calloc(PA_MAX_PACKAGES, sizeof(char *))},
+                   .alias_keys = {.items = calloc(PA_MAX_ALIAS_KEYS, sizeof(char *))}};
     if (!w.configs) {
         pa_names_free(&w.packages);
+        pa_names_free(&w.alias_keys);
         return NULL;
     }
-    char gitignore_path[PA_PATH_MAX];
-    snprintf(gitignore_path, sizeof(gitignore_path), "%s/.gitignore", repo_path);
-    w.gitignore = ctx_gitignore_load(gitignore_path);
+    /* What discovery walks, so that a package it indexes is one the tree
+     * declares: the root .gitignore applies only where discovery applies it. */
+    w.gitignore = ctx_discover_root_gitignore(repo_path);
     pa_walk(&w, "", 0);
     ctx_gitignore_free(w.gitignore);
     if (w.count >= PA_MAX_CONFIGS) {
         ctx_log_warn("path_alias.configs.cap_hit", "repo", repo_path);
     }
-    if (w.packages.count >= PA_MAX_PACKAGES) {
-        ctx_log_warn("path_alias.packages.cap_hit", "repo", repo_path);
+    if (w.truncated) {
+        ctx_log_warn("path_alias.walk.truncated", "repo", repo_path);
     }
     pa_names_seal(&w.packages);
+    pa_names_seal(&w.alias_keys);
 
     ctx_path_aliases_t *aliases = calloc(1, sizeof(*aliases));
     if (aliases && w.count > 0) {
@@ -550,7 +639,8 @@ ctx_path_aliases_t *ctx_path_aliases_load(const char *repo_path) {
             s->paths = opts.paths;
             s->base_url = opts.base_url;
             if (s->base_url) {
-                s->base_entries = pa_list_base_entries(repo_path, s->base_url);
+                s->base_entries =
+                    pa_list_base_entries(repo_path, s->base_url, &s->base_truncated);
             }
             any = any || s->paths.count > 0 || s->base_url;
             opts.paths = (pa_patterns_t){0};
@@ -562,15 +652,23 @@ ctx_path_aliases_t *ctx_path_aliases_load(const char *repo_path) {
     free(w.configs);
     if (aliases) {
         aliases->packages = w.packages;
+        aliases->alias_keys = w.alias_keys;
+        aliases->incomplete = w.truncated;
         w.packages = (pa_names_t){0};
-        any = any || aliases->packages.count > 0;
+        w.alias_keys = (pa_names_t){0};
+        any = any || aliases->packages.count > 0 || aliases->alias_keys.count > 0 ||
+              aliases->incomplete;
     }
     pa_names_free(&w.packages);
+    pa_names_free(&w.alias_keys);
     if (!any) {
         ctx_path_aliases_free(aliases);
         return NULL;
     }
-    qsort(aliases->scopes, (size_t)aliases->count, sizeof(pa_scope_t), pa_scope_deeper_first);
+    if (aliases->count > 1) {
+        qsort(aliases->scopes, (size_t)aliases->count, sizeof(pa_scope_t),
+              pa_scope_deeper_first);
+    }
     char count_buf[CTX_SZ_32];
     snprintf(count_buf, sizeof(count_buf), "%d", aliases->count);
     ctx_log_info("path_alias.loaded", "configs", count_buf);
@@ -723,7 +821,7 @@ static bool pa_names_package(const ctx_path_aliases_t *aliases, const char *spec
     char buf[PA_PATH_MAX];
     int n = snprintf(buf, sizeof(buf), "%s", specifier);
     if (n <= 0 || (size_t)n >= sizeof(buf)) {
-        return false;
+        return true; /* too long to look up: never judged external */
     }
     for (;;) {
         if (pa_names_has(&aliases->packages, buf)) {
@@ -740,18 +838,47 @@ static bool pa_names_package(const ctx_path_aliases_t *aliases, const char *spec
 /* Whether baseUrl reaches something real for the specifier: its first
  * segment is a directory or file directly under baseUrl. */
 static bool pa_base_reaches(const pa_scope_t *scope, const char *specifier) {
-    if (!scope->base_url || scope->base_entries.count == 0) {
+    if (!scope->base_url) {
         return false;
+    }
+    if (scope->base_truncated) {
+        return true; /* the listing stopped short: whatever it missed */
     }
     const char *slash = strchr(specifier, '/');
     size_t len = slash ? (size_t)(slash - specifier) : strlen(specifier);
     char first[PA_PATH_MAX];
-    if (len == 0 || len >= sizeof(first)) {
+    if (len >= sizeof(first)) {
+        return true; /* too long to look up: never judged external */
+    }
+    if (len == 0 || scope->base_entries.count == 0) {
         return false;
     }
     memcpy(first, specifier, len);
     first[len] = '\0';
     return pa_names_has(&scope->base_entries, first);
+}
+
+/* Whether a `paths` key of a config no scope reads matches the specifier,
+ * by TypeScript's rule: whole, or around the key's one '*'. */
+static bool pa_unscoped_key_matches(const ctx_path_aliases_t *aliases, const char *specifier) {
+    size_t spec_len = strlen(specifier);
+    for (int i = 0; i < aliases->alias_keys.count; i++) {
+        const char *key = aliases->alias_keys.items[i];
+        const char *star = strchr(key, '*');
+        if (!star) {
+            if (strcmp(key, specifier) == 0) {
+                return true;
+            }
+            continue;
+        }
+        size_t plen = (size_t)(star - key);
+        size_t slen = strlen(star + 1);
+        if (spec_len >= plen + slen && strncmp(specifier, key, plen) == 0 &&
+            strcmp(specifier + spec_len - slen, star + 1) == 0) {
+            return true;
+        }
+    }
+    return false;
 }
 
 bool ctx_path_aliases_claims(const ctx_path_aliases_t *aliases, const char *source_rel,
@@ -771,7 +898,9 @@ bool ctx_path_aliases_claims(const ctx_path_aliases_t *aliases, const char *sour
     if (!aliases) {
         return false;
     }
-    if (pa_names_package(aliases, specifier)) {
+    /* A walk that stopped at a cap missed what it would have claimed. */
+    if (aliases->incomplete || pa_names_package(aliases, specifier) ||
+        pa_unscoped_key_matches(aliases, specifier)) {
         return true;
     }
     const pa_scope_t *scope = pa_scope_for(aliases, source_rel);
@@ -784,4 +913,56 @@ bool ctx_path_aliases_claims(const ctx_path_aliases_t *aliases, const char *sour
         return true;
     }
     return pa_base_reaches(scope, specifier);
+}
+
+/* Whether s is two or more segments, none empty. */
+static bool pa_two_segments(const char *s) {
+    const char *slash = strchr(s, '/');
+    if (!slash || slash == s) {
+        return false;
+    }
+    for (const char *p = slash; *p; p++) {
+        if (*p == '/' && (p[1] == '/' || p[1] == '\0')) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/* Whether run occurs in path as whole segments. */
+static bool pa_has_segment_run(const char *path, const char *run) {
+    size_t n = strlen(run);
+    for (const char *p = path; (p = strstr(p, run)) != NULL; p++) {
+        if ((p == path || p[-1] == '/') && (p[n] == '\0' || p[n] == '/')) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool ctx_path_aliases_specifier_names_file(const char *specifier, const char *file_rel) {
+    if (!specifier || !file_rel) {
+        return false;
+    }
+    char path[PA_PATH_MAX];
+    int n = snprintf(path, sizeof(path), "%s", file_rel);
+    if (n <= 0 || (size_t)n >= sizeof(path)) {
+        return false;
+    }
+    /* A specifier names a module: the file's extension is not part of it. */
+    char *slash = strrchr(path, '/');
+    char *base = slash ? slash + 1 : path;
+    char *dot = strrchr(base, '.');
+    if (dot && dot != base) {
+        *dot = '\0';
+    }
+    /* `@utils/money` is spelled with its '@' or without it: an alias key
+     * borrows the scope sign, a workspace directory may carry it. */
+    const char *forms[] = {specifier, specifier[0] == '@' ? specifier + 1 : NULL};
+    for (size_t i = 0; i < sizeof(forms) / sizeof(forms[0]); i++) {
+        if (forms[i] && pa_two_segments(forms[i]) && pa_has_segment_run(path, forms[i])) {
+            return true;
+        }
+    }
+    return false;
 }

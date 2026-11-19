@@ -93,8 +93,8 @@ static char *extract_local_name_from_json(const char *props_json) {
 
 static int build_import_map(ctx_pipeline_ctx_t *ctx, const char *rel_path,
                             const CtxFileResult *result, const char ***out_keys,
-                            const char ***out_vals, int *out_count, const char ***out_externals,
-                            int *out_external_count) {
+                            const char ***out_vals, int *out_count,
+                            ctx_external_import_t **out_externals, int *out_external_count) {
     *out_keys = NULL;
     *out_vals = NULL;
     *out_count = 0;
@@ -343,9 +343,9 @@ static int try_emit_global_http_call(ctx_pipeline_ctx_t *ctx, const CtxCall *cal
     return SKIP_ONE;
 }
 
-/* The local names a file imports only from packages (T-jnpg). */
+/* What a file imports only from packages (T-jnpg). */
 typedef struct {
-    const char **names;
+    ctx_external_import_t *items;
     int count;
 } pc_externals_t;
 
@@ -371,8 +371,8 @@ static int resolve_single_call(ctx_pipeline_ctx_t *ctx, CtxCall *call, const cha
     }
     bool bind_plain =
         ctx_registry_admits_member_call(ctx->registry, lang, call->callee_name, &res, imports) &&
-        ctx_registry_admits_bare_call(lang, call->callee_name, &res, externals->names,
-                                      externals->count);
+        ctx_registry_admits_bare_call(lang, call->callee_name, &res, target_node->file_path,
+                                      externals->items, externals->count);
     emit_classified_edge(ctx, call, source_node, target_node, &res, bind_plain, module_qn, imp_keys,
                          imp_vals, imp_count);
     return bind_plain ? SKIP_ONE : 0;
@@ -431,7 +431,7 @@ int ctx_pipeline_pass_calls(ctx_pipeline_ctx_t *ctx, const ctx_file_info_t *file
         const char **imp_vals = NULL;
         int imp_count = 0;
         pc_externals_t externals = {0};
-        build_import_map(ctx, rel, result, &imp_keys, &imp_vals, &imp_count, &externals.names,
+        build_import_map(ctx, rel, result, &imp_keys, &imp_vals, &imp_count, &externals.items,
                          &externals.count);
 
         /* Compute module QN for same-module resolution */
@@ -454,7 +454,7 @@ int ctx_pipeline_pass_calls(ctx_pipeline_ctx_t *ctx, const ctx_file_info_t *file
 
         free(module_qn);
         free_import_map(imp_keys, imp_vals, imp_count);
-        free((void *)externals.names);
+        free(externals.items);
         if (result_owned) {
             ctx_free_result(result);
         }

@@ -75,6 +75,26 @@ static int setup_pa_repo(void) {
         {"tools/cli/package.json", "{ \"name\": \"acme-cli\" }\n"},
         {"package.json", "{ \"private\": true }\n"},
         {"node_modules/antd/package.json", "{ \"name\": \"antd\" }\n"},
+        /* Vite's template: the project's config only references the app's,
+         * which holds the aliases; the loader scopes a config by directory,
+         * not by references. */
+        {"spa/tsconfig.json", "{ \"files\": [],\n"
+                              "  \"references\": [{ \"path\": \"./tsconfig.app.json\" }] }\n"},
+        {"spa/tsconfig.app.json", "{ \"compilerOptions\": { \"paths\": {\n"
+                                  "  \"@shared/*\": [\"src/common/*\"],\n"
+                                  "  \"*\": [\"src/*\"]\n"
+                                  "} } }\n"},
+        /* Dependencies the manifest points into the tree, by keys that are
+         * not the target's name; and two that are not in the tree. */
+        {"app/package.json", "{ \"name\": \"acme-app\",\n"
+                             "  \"dependencies\": { \"shared\": \"file:../shared-lib\",\n"
+                             "    \"kit2\": \"link:../kit\", \"left-pad\": \"^1.3.0\" },\n"
+                             "  \"devDependencies\": { \"plug\": \"portal:../plug\",\n"
+                             "    \"wk\": \"workspace:*\", \"lodash4\": \"npm:lodash@4\" } }\n"},
+        /* Ignored by the root .gitignore; this tree has no .git directory,
+         * so discovery indexes it all the same. */
+        {".gitignore", "generated/\n"},
+        {"generated/client/package.json", "{ \"name\": \"@acme/client\" }\n"},
     };
     for (size_t i = 0; i < sizeof(files) / sizeof(files[0]); i++) {
         if (pa_write(files[i][0], files[i][1]) != 0) {
@@ -234,8 +254,6 @@ TEST(workspace_package_claims_its_name) {
     PASS();
 }
 
-/* Package specifiers are a JS-family notion: a Python module path is never
- * judged by them. */
 /* A specifier no npm package can have is an alias some tool resolves (Nuxt's
  * `~/`, Vite's `@/`, SvelteKit's `$lib`, Node's `#` subpath imports) or a
  * virtual module: never known to be external, with or without a tsconfig. */
@@ -257,10 +275,158 @@ TEST(specifier_no_package_can_have_is_claimed) {
     PASS();
 }
 
+/* Package specifiers are a JS-family notion: a Python module path is never
+ * judged by them. */
 TEST(non_script_file_claims_only_relative_specifiers) {
     ASSERT_EQ(ensure_pa(), 0);
     ASSERT_FALSE(ctx_path_aliases_claims(g_pa, "web/tool.py", "@acme/kit"));
     ASSERT_TRUE(ctx_path_aliases_claims(g_pa, "web/tool.py", "./sibling"));
+    PASS();
+}
+
+/* A config the loader does not scope, such as the tsconfig.app.json that
+ * Vite's template keeps its aliases in and the project's tsconfig.json only
+ * references: its alias keys claim their specifiers from any file. A bare
+ * "*" key is not one: it would claim every package. */
+TEST(alias_key_of_an_unscoped_config_claims_its_specifiers) {
+    ASSERT_EQ(ensure_pa(), 0);
+    ASSERT_TRUE(ctx_path_aliases_claims(g_pa, "spa/src/main.ts", "@shared/strings"));
+    ASSERT_TRUE(ctx_path_aliases_claims(g_pa, "apps/main.ts", "@shared/strings"));
+    ASSERT_FALSE(ctx_path_aliases_claims(g_pa, "spa/src/main.ts", "@sharedx/strings"));
+    ASSERT_FALSE(ctx_path_aliases_claims(g_pa, "spa/src/main.ts", "react"));
+    PASS();
+}
+
+/* A dependency the manifest points into the tree (file:, link:, portal:,
+ * workspace:) claims the key the code imports it by, whatever the package
+ * there calls itself. A registry range or an npm: alias claims nothing. */
+TEST(local_dependency_claims_its_key) {
+    ASSERT_EQ(ensure_pa(), 0);
+    const char *local[] = {"shared", "shared/sub", "kit2", "plug", "wk"};
+    for (size_t i = 0; i < sizeof(local) / sizeof(local[0]); i++) {
+        ASSERT_TRUE(ctx_path_aliases_claims(g_pa, "apps/main.ts", local[i]));
+    }
+    ASSERT_FALSE(ctx_path_aliases_claims(g_pa, "apps/main.ts", "left-pad"));
+    ASSERT_FALSE(ctx_path_aliases_claims(g_pa, "apps/main.ts", "lodash4"));
+    PASS();
+}
+
+/* A small repo of its own, loaded. git: 0 for no .git, 1 for a .git
+ * directory, 2 for a .git file, as in a linked worktree. */
+static ctx_path_aliases_t *pa_load_tree(char *dir, size_t dir_size, const char *const files[][2],
+                                        size_t n, int git) {
+    snprintf(dir, dir_size, "/tmp/ctx_pa_tree_XXXXXX");
+    if (!ctx_mkdtemp(dir)) {
+        dir[0] = '\0';
+        return NULL;
+    }
+    if (git == 1) {
+        th_mkdir_p(TH_PATH(dir, ".git"));
+    } else if (git == 2) {
+        th_write_file(TH_PATH(dir, ".git"), "gitdir: /elsewhere/.git/worktrees/x\n");
+    }
+    for (size_t i = 0; i < n; i++) {
+        th_write_file(TH_PATH(dir, files[i][0]), files[i][1]);
+    }
+    return ctx_path_aliases_load(dir);
+}
+
+/* Package names follow what discovery indexes. Discovery applies the root
+ * .gitignore only when .git is a directory: not in a linked worktree, whose
+ * .git is a file, nor in a tree without one. There a gitignored package is
+ * indexed, and its name is the tree's. (The trees below have no tsconfig at
+ * all: package names load without one.) */
+TEST(gitignored_package_counts_where_discovery_indexes_it) {
+    ASSERT_EQ(ensure_pa(), 0);
+    ASSERT_TRUE(ctx_path_aliases_claims(g_pa, "apps/main.ts", "@acme/client"));
+    static const char *const files[][2] = {
+        {".gitignore", "generated/\n"},
+        {"generated/client/package.json", "{ \"name\": \"@acme/client\" }\n"},
+        {"tools/package.json", "{ \"name\": \"@acme/tools\" }\n"},
+    };
+    for (int git = 1; git <= 2; git++) {
+        char dir[256];
+        ctx_path_aliases_t *a = pa_load_tree(dir, sizeof(dir), files, 3, git);
+        bool loaded = a != NULL;
+        bool tools = ctx_path_aliases_claims(a, "apps/main.ts", "@acme/tools");
+        bool client = ctx_path_aliases_claims(a, "apps/main.ts", "@acme/client");
+        ctx_path_aliases_free(a);
+        if (dir[0]) {
+            th_rmtree(dir);
+        }
+        ASSERT_TRUE(loaded);
+        ASSERT_TRUE(tools);
+        ASSERT_EQ(client, git == 2);
+    }
+    PASS();
+}
+
+/* A walk that stops at a cap has missed configs and packages it would have
+ * claimed, so it claims every package-shaped specifier: the rule never cuts
+ * what it could not see. 1100 projects is past the 1024-config cap. */
+TEST(walk_stopped_at_a_cap_claims_every_package) {
+    char dir[256];
+    snprintf(dir, sizeof(dir), "/tmp/ctx_pa_cap_XXXXXX");
+    ASSERT_NOT_NULL(ctx_mkdtemp(dir));
+    for (int i = 0; i < 1100; i++) {
+        char rel[64];
+        char body[96];
+        snprintf(rel, sizeof(rel), "d%04d/tsconfig.json", i);
+        th_write_file(TH_PATH(dir, rel), "{}\n");
+        snprintf(rel, sizeof(rel), "d%04d/package.json", i);
+        snprintf(body, sizeof(body), "{ \"name\": \"@acme/d%04d\" }\n", i);
+        th_write_file(TH_PATH(dir, rel), body);
+    }
+    ctx_path_aliases_t *a = ctx_path_aliases_load(dir);
+    int unclaimed = 0;
+    for (int i = 0; i < 1100; i++) {
+        char spec[32];
+        snprintf(spec, sizeof(spec), "@acme/d%04d", i);
+        unclaimed += !ctx_path_aliases_claims(a, "d0000/x.ts", spec);
+    }
+    bool react = ctx_path_aliases_claims(a, "d0000/x.ts", "react");
+    ctx_path_aliases_free(a);
+    th_rmtree(dir);
+    ASSERT_EQ(unclaimed, 0);
+    ASSERT_TRUE(react);
+    PASS();
+}
+
+/* A specifier too long to look up is claimed, not judged external. */
+TEST(overlong_specifier_is_claimed) {
+    ASSERT_EQ(ensure_pa(), 0);
+    char spec[1400];
+    int n = snprintf(spec, sizeof(spec), "@acme/kit/");
+    memset(spec + n, 'a', 1300);
+    spec[n + 1300] = '\0';
+    ASSERT_TRUE(ctx_path_aliases_claims(g_pa, "apps/main.ts", spec));
+    PASS();
+}
+
+/* An alias a bundler resolves usually spells the path it points at:
+ * `@utils/money` for src/utils/money.js. Two segments at least, matched
+ * whole, against the file (extension dropped) or a directory holding it. */
+TEST(specifier_names_the_file_it_spells) {
+    ASSERT_TRUE(ctx_path_aliases_specifier_names_file("@utils/money", "rn/src/utils/money.js"));
+    ASSERT_TRUE(ctx_path_aliases_specifier_names_file("utils/tax", "rn/src/utils/tax.js"));
+    ASSERT_TRUE(
+        ctx_path_aliases_specifier_names_file("@utils/date", "rn/src/utils/date/format.js"));
+    ASSERT_TRUE(ctx_path_aliases_specifier_names_file("@components/Button",
+                                                      "src/components/Button/index.tsx"));
+    ASSERT_TRUE(
+        ctx_path_aliases_specifier_names_file("@acme/kit", "packages/@acme/kit/src/use.ts"));
+    ASSERT_TRUE(ctx_path_aliases_specifier_names_file("utils/money.helpers",
+                                                      "src/utils/money.helpers.ts"));
+    /* One segment: a wrapper named after its package is not the package. */
+    ASSERT_FALSE(ctx_path_aliases_specifier_names_file("dayjs", "lib/dayjs.ts"));
+    ASSERT_FALSE(ctx_path_aliases_specifier_names_file("lodash/fp", "lib/clone.ts"));
+    ASSERT_FALSE(ctx_path_aliases_specifier_names_file("utils/mon", "rn/src/utils/money.js"));
+    ASSERT_FALSE(ctx_path_aliases_specifier_names_file("ils/money", "rn/src/utils/money.js"));
+    ASSERT_FALSE(ctx_path_aliases_specifier_names_file("utils/money/x", "rn/src/utils/money.js"));
+    ASSERT_FALSE(ctx_path_aliases_specifier_names_file("utils//money", "src/utils/money.ts"));
+    ASSERT_FALSE(ctx_path_aliases_specifier_names_file("utils/", "src/utils/x.ts"));
+    ASSERT_FALSE(ctx_path_aliases_specifier_names_file(NULL, "a/b.ts"));
+    ASSERT_FALSE(ctx_path_aliases_specifier_names_file("a/b", NULL));
     PASS();
 }
 
@@ -280,6 +446,12 @@ SUITE(path_alias) {
     RUN_TEST(workspace_package_claims_its_name);
     RUN_TEST(specifier_no_package_can_have_is_claimed);
     RUN_TEST(non_script_file_claims_only_relative_specifiers);
+    RUN_TEST(alias_key_of_an_unscoped_config_claims_its_specifiers);
+    RUN_TEST(local_dependency_claims_its_key);
+    RUN_TEST(gitignored_package_counts_where_discovery_indexes_it);
+    RUN_TEST(walk_stopped_at_a_cap_claims_every_package);
+    RUN_TEST(overlong_specifier_is_claimed);
+    RUN_TEST(specifier_names_the_file_it_spells);
     ctx_path_aliases_free(g_pa);
     g_pa = NULL;
     g_pa_tried = false;

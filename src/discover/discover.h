@@ -58,6 +58,13 @@ bool ctx_gitignore_matches(const ctx_gitignore_t *gi, const char *rel_path, bool
 /* Free a gitignore matcher. NULL-safe. */
 void ctx_gitignore_free(ctx_gitignore_t *gi);
 
+/* The root .gitignore as discovery applies it: only when <repo_path>/.git is
+ * a directory. NULL in a tree without .git, in a linked worktree (whose .git
+ * is a file; cortex-indexer T-0fy2), or with no .gitignore. A walk that must
+ * agree with discovery on what the tree holds loads it here. Caller frees
+ * with ctx_gitignore_free(). */
+ctx_gitignore_t *ctx_discover_root_gitignore(const char *repo_path);
+
 /* ── Directory skip / suffix filters ─────────────────────────────── */
 
 /* Index mode controls filtering aggressiveness.

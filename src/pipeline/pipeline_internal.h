@@ -79,17 +79,25 @@ void ctx_pipeline_import_map_from_result(const ctx_pipeline_ctx_t *ctx, const ch
                                          const CtxFileResult *result, const char ***out_keys,
                                          const char ***out_vals, int *out_count);
 
-/* ctx_pipeline_import_map_from_result, plus the file's external names (todo
- * T-jnpg): in a script file, the local names imported only from specifiers
- * that name no node and that nothing in the tree claims
+/* A local name a script file imports from a specifier that names no node
+ * and that nothing in the tree claims (todo T-jnpg): `render` from
+ * '@testing-library/react'. Both strings are borrowed. */
+typedef struct {
+    const char *name;
+    const char *specifier;
+} ctx_external_import_t;
+
+/* ctx_pipeline_import_map_from_result, plus the file's external imports
+ * (todo T-jnpg): in a script file, each local name imported from a specifier
+ * that names no node and that nothing in the tree claims
  * (ctx_path_aliases_claims) — `render` from '@testing-library/react',
- * `resolve` from 'node:path'. A name with any in-tree import is not one.
- * The names are borrowed from result; the caller frees only the array. NULL
- * out_externals asks for the map alone. */
+ * `resolve` from 'node:path' — with that specifier. A name with any in-tree
+ * import is not external. The strings are borrowed from result; the caller
+ * frees only the array. NULL out_externals asks for the map alone. */
 void ctx_pipeline_import_map_with_externals(const ctx_pipeline_ctx_t *ctx, const char *source_rel,
                                             const CtxFileResult *result, const char ***out_keys,
                                             const char ***out_vals, int *out_count,
-                                            const char ***out_externals,
+                                            ctx_external_import_t **out_externals,
                                             int *out_external_count);
 
 /* Check cancellation. Returns non-zero if cancelled. */
@@ -399,16 +407,19 @@ bool ctx_registry_admits_member_call(const ctx_registry_t *r, CtxLanguage lang,
  * used to land on the project's one function named `render`; the call runs
  * the package's code, which the graph does not hold.
  *
- * external_names are those local names, from
+ * externals are those names with their specifiers, from
  * ctx_pipeline_import_map_with_externals. A name also imported from a module
  * in the tree is not among them, and import_map / same_module resolutions are
- * kept: they followed the import or the file itself.
+ * kept: they followed the import or the file itself. So is a guess onto
+ * target_file, the guessed node's file, when one of the name's specifiers
+ * spells its path (ctx_path_aliases_specifier_names_file): that is where a
+ * bundler alias the loader cannot see points.
  *
  * Only the plain CALLS edge is withheld, as with
  * ctx_registry_admits_member_call. Everything else returns true. */
 bool ctx_registry_admits_bare_call(CtxLanguage lang, const char *callee_name,
-                                   const ctx_resolution_t *res, const char *const *external_names,
-                                   int external_count);
+                                   const ctx_resolution_t *res, const char *target_file,
+                                   const ctx_external_import_t *externals, int external_count);
 
 /* ── Pass function prototypes ────────────────────────────────────── */
 

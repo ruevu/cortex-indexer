@@ -591,7 +591,16 @@ static ctx_resolution_t guess(const char *strategy) {
     return (ctx_resolution_t){"proj.lib.render.render", strategy, 0.5, 1};
 }
 
-static const char *const EXTERNAL[] = {"render", "resolve"};
+/* What `import { render } from '@testing-library/react'` and
+ * `import { resolve } from 'node:path'` leave external. */
+static const ctx_external_import_t EXTERNAL[] = {{"render", "@testing-library/react"},
+                                                 {"resolve", "node:path"}};
+
+/* ctx_registry_admits_bare_call for a guess landing in lib/render.ts. */
+static bool admits(CtxLanguage lang, const char *callee, const ctx_resolution_t *res,
+                   const ctx_external_import_t *externals, int count) {
+    return ctx_registry_admits_bare_call(lang, callee, res, "lib/render.ts", externals, count);
+}
 
 /* `import { render } from '@testing-library/react'` then `render()`: the
  * source says the name is the package's, so a guess onto a project
@@ -600,11 +609,11 @@ TEST(bare_call_to_external_import_is_refused_when_guessed) {
     ctx_resolution_t u = guess("unique_name");
     ctx_resolution_t s = guess("suffix_match");
     ctx_resolution_t f = guess("fuzzy");
-    ASSERT_FALSE(ctx_registry_admits_bare_call(CTX_LANG_TYPESCRIPT, "render", &u, EXTERNAL, 2));
-    ASSERT_FALSE(ctx_registry_admits_bare_call(CTX_LANG_TSX, "render", &s, EXTERNAL, 2));
-    ASSERT_FALSE(ctx_registry_admits_bare_call(CTX_LANG_JAVASCRIPT, "resolve", &f, EXTERNAL, 2));
-    ASSERT_FALSE(ctx_registry_admits_bare_call(CTX_LANG_VUE, "render", &u, EXTERNAL, 2));
-    ASSERT_FALSE(ctx_registry_admits_bare_call(CTX_LANG_SVELTE, "render", &u, EXTERNAL, 2));
+    ASSERT_FALSE(admits(CTX_LANG_TYPESCRIPT, "render", &u, EXTERNAL, 2));
+    ASSERT_FALSE(admits(CTX_LANG_TSX, "render", &s, EXTERNAL, 2));
+    ASSERT_FALSE(admits(CTX_LANG_JAVASCRIPT, "resolve", &f, EXTERNAL, 2));
+    ASSERT_FALSE(admits(CTX_LANG_VUE, "render", &u, EXTERNAL, 2));
+    ASSERT_FALSE(admits(CTX_LANG_SVELTE, "render", &u, EXTERNAL, 2));
     PASS();
 }
 
@@ -612,8 +621,8 @@ TEST(bare_call_to_external_import_is_refused_when_guessed) {
 TEST(bare_call_resolved_through_the_import_is_kept) {
     ctx_resolution_t im = guess("import_map");
     ctx_resolution_t sm = guess("same_module");
-    ASSERT_TRUE(ctx_registry_admits_bare_call(CTX_LANG_TYPESCRIPT, "render", &im, EXTERNAL, 2));
-    ASSERT_TRUE(ctx_registry_admits_bare_call(CTX_LANG_TYPESCRIPT, "render", &sm, EXTERNAL, 2));
+    ASSERT_TRUE(admits(CTX_LANG_TYPESCRIPT, "render", &im, EXTERNAL, 2));
+    ASSERT_TRUE(admits(CTX_LANG_TYPESCRIPT, "render", &sm, EXTERNAL, 2));
     PASS();
 }
 
@@ -622,12 +631,28 @@ TEST(bare_call_resolved_through_the_import_is_kept) {
  * unchanged; and nothing listed means nothing refused. */
 TEST(bare_call_rule_stays_in_its_lane) {
     ctx_resolution_t u = guess("unique_name");
-    ASSERT_TRUE(ctx_registry_admits_bare_call(CTX_LANG_TYPESCRIPT, "lib.render", &u, EXTERNAL, 2));
-    ASSERT_TRUE(ctx_registry_admits_bare_call(CTX_LANG_TYPESCRIPT, "paint", &u, EXTERNAL, 2));
-    ASSERT_TRUE(ctx_registry_admits_bare_call(CTX_LANG_PYTHON, "render", &u, EXTERNAL, 2));
-    ASSERT_TRUE(ctx_registry_admits_bare_call(CTX_LANG_TYPESCRIPT, "render", &u, NULL, 0));
-    ASSERT_TRUE(ctx_registry_admits_bare_call(CTX_LANG_TYPESCRIPT, NULL, &u, EXTERNAL, 2));
-    ASSERT_TRUE(ctx_registry_admits_bare_call(CTX_LANG_TYPESCRIPT, "render", NULL, EXTERNAL, 2));
+    ASSERT_TRUE(admits(CTX_LANG_TYPESCRIPT, "lib.render", &u, EXTERNAL, 2));
+    ASSERT_TRUE(admits(CTX_LANG_TYPESCRIPT, "paint", &u, EXTERNAL, 2));
+    ASSERT_TRUE(admits(CTX_LANG_PYTHON, "render", &u, EXTERNAL, 2));
+    ASSERT_TRUE(admits(CTX_LANG_TYPESCRIPT, "render", &u, NULL, 0));
+    ASSERT_TRUE(admits(CTX_LANG_TYPESCRIPT, NULL, &u, EXTERNAL, 2));
+    ASSERT_TRUE(admits(CTX_LANG_TYPESCRIPT, "render", NULL, EXTERNAL, 2));
+    PASS();
+}
+
+/* A guess that lands in the file the specifier spells is where a bundler
+ * alias points (`@utils/money` for src/utils/money.js): kept. One import of
+ * the name that spells it is enough; with no target file, nothing does. */
+TEST(bare_call_landing_where_its_specifier_points_is_kept) {
+    ctx_resolution_t u = guess("unique_name");
+    static const ctx_external_import_t alias[] = {{"formatMoney", "lodash"},
+                                                  {"formatMoney", "@utils/money"}};
+    ASSERT_TRUE(ctx_registry_admits_bare_call(CTX_LANG_JAVASCRIPT, "formatMoney", &u,
+                                              "rn/src/utils/money.js", alias, 2));
+    ASSERT_FALSE(ctx_registry_admits_bare_call(CTX_LANG_JAVASCRIPT, "formatMoney", &u,
+                                               "lib/money.js", alias, 2));
+    ASSERT_FALSE(ctx_registry_admits_bare_call(CTX_LANG_JAVASCRIPT, "formatMoney", &u, NULL,
+                                               alias, 2));
     PASS();
 }
 
@@ -688,4 +713,5 @@ SUITE(registry) {
     RUN_TEST(bare_call_to_external_import_is_refused_when_guessed);
     RUN_TEST(bare_call_resolved_through_the_import_is_kept);
     RUN_TEST(bare_call_rule_stays_in_its_lane);
+    RUN_TEST(bare_call_landing_where_its_specifier_points_is_kept);
 }

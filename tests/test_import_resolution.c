@@ -93,6 +93,69 @@ static int setup_import_repo(void) {
                            "  useCounter();\n"
                            "  useTheme();\n"
                            "}\n"},
+        /* Aliases the loader cannot see. Vite's template keeps them in a
+         * tsconfig.app.json the project's tsconfig.json only references, and
+         * a key need not spell the path it maps to. */
+        {"web/tsconfig.json", "{ \"files\": [],\n"
+                              "  \"references\": [{ \"path\": \"./tsconfig.app.json\" }] }\n"},
+        {"web/tsconfig.app.json", "{ \"compilerOptions\": { \"paths\": {\n"
+                                  "  \"@lib/*\": [\"src/lib/*\"],\n"
+                                  "  \"@shared/*\": [\"src/common/*\"]\n"
+                                  "} } }\n"},
+        {"web/src/lib/format.ts", "export function formatDateA(): string {\n"
+                                  "  return '';\n"
+                                  "}\n"},
+        {"web/src/common/strings.ts", "export function padA(): string {\n"
+                                      "  return '';\n"
+                                      "}\n"},
+        {"web/src/app.ts", "import { formatDateA } from '@lib/format';\n"
+                           "import { padA } from '@shared/strings';\n"
+                           "\n"
+                           "export function mainA(): void {\n"
+                           "  formatDateA();\n"
+                           "  padA();\n"
+                           "}\n"},
+        /* A JS app whose aliases live in a babel or webpack config, with no
+         * tsconfig at all; each alias spells the path it points at, a file
+         * or a directory that re-exports it. */
+        {"rn/src/utils/money.js", "export function formatMoneyB() {\n"
+                                  "  return 0;\n"
+                                  "}\n"},
+        {"rn/src/utils/tax.js", "export function taxB() {\n"
+                                "  return 0;\n"
+                                "}\n"},
+        {"rn/src/utils/date/index.js", "export { formatDayB } from './format';\n"},
+        {"rn/src/utils/date/format.js", "export function formatDayB() {\n"
+                                        "  return '';\n"
+                                        "}\n"},
+        {"rn/src/screens/Home.js", "import { formatMoneyB } from '@utils/money';\n"
+                                   "import { taxB } from 'utils/tax';\n"
+                                   "import { formatDayB } from '@utils/date';\n"
+                                   "\n"
+                                   "export function homeB() {\n"
+                                   "  formatMoneyB();\n"
+                                   "  taxB();\n"
+                                   "  formatDayB();\n"
+                                   "}\n"},
+        /* One name imported from a package and from a path the tree claims
+         * but the resolver cannot follow, as a Vue file's two script blocks
+         * can. */
+        {"colors/tint.ts", "export function tintC(): string {\n"
+                           "  return '';\n"
+                           "}\n"},
+        {"pages/swatch.ts", "import { tintC } from 'chroma-js';\n"
+                            "import { tintC } from '~/colors/tint';\n"
+                            "\n"
+                            "export function swatchC(): string {\n"
+                            "  return tintC();\n"
+                            "}\n"},
+        /* A package subpath of two segments that spells no project path. */
+        {"lib/clone.ts", "export function cloneDeepD(): void {}\n"},
+        {"ui_tests/copy.test.ts", "import { cloneDeepD } from 'lodash/fp';\n"
+                                  "\n"
+                                  "export function copiesD(): void {\n"
+                                  "  cloneDeepD();\n"
+                                  "}\n"},
         /* The function every caller means. */
         {"util/date.ts", "export function formatDate(d: string): string {\n"
                          "  return d;\n"
@@ -912,6 +975,39 @@ TEST(call_through_a_framework_alias_is_kept) {
     PASS();
 }
 
+/* An alias the loader cannot see keeps its guess: one kept in a
+ * tsconfig.app.json that the project's config only references, whether or
+ * not its key spells the path; and a bundler alias that spells the path it
+ * points at, a file or a directory re-exporting it. */
+TEST(call_through_an_alias_the_loader_cannot_see_is_kept) {
+    BOTH_MODES(pf_find_call(g_seq, "mainA", "lib.format.formatDateA") != NULL,
+               pf_find_call(g_par, "mainA", "lib.format.formatDateA") != NULL);
+    BOTH_MODES(pf_find_call(g_seq, "mainA", "common.strings.padA") != NULL,
+               pf_find_call(g_par, "mainA", "common.strings.padA") != NULL);
+    BOTH_MODES(pf_find_call(g_seq, "homeB", "utils.money.formatMoneyB") != NULL,
+               pf_find_call(g_par, "homeB", "utils.money.formatMoneyB") != NULL);
+    BOTH_MODES(pf_find_call(g_seq, "homeB", "utils.tax.taxB") != NULL,
+               pf_find_call(g_par, "homeB", "utils.tax.taxB") != NULL);
+    BOTH_MODES(pf_find_call(g_seq, "homeB", "date.format.formatDayB") != NULL,
+               pf_find_call(g_par, "homeB", "date.format.formatDayB") != NULL);
+    PASS();
+}
+
+/* A name the file also imports from a path the tree claims is not the
+ * package's alone: the guess stays. */
+TEST(name_also_imported_from_the_tree_keeps_its_guess) {
+    BOTH_MODES(pf_find_call(g_seq, "swatchC", "colors.tint.tintC") != NULL,
+               pf_find_call(g_par, "swatchC", "colors.tint.tintC") != NULL);
+    PASS();
+}
+
+/* A package subpath that spells no project path is still the package's. */
+TEST(package_subpath_spelling_no_project_path_is_not_guessed) {
+    BOTH_MODES(!pf_find_call(g_seq, "copiesD", "lib.clone.cloneDeepD"),
+               !pf_find_call(g_par, "copiesD", "lib.clone.cloneDeepD"));
+    PASS();
+}
+
 SUITE(import_resolution) {
     RUN_TEST(bare_imported_call_resolves_through_import_map);
     RUN_TEST(member_of_imported_class_resolves_exactly);
@@ -945,5 +1041,8 @@ SUITE(import_resolution) {
     RUN_TEST(call_to_a_package_import_is_not_guessed_onto_the_project);
     RUN_TEST(call_to_a_workspace_package_import_is_kept);
     RUN_TEST(call_through_a_framework_alias_is_kept);
+    RUN_TEST(call_through_an_alias_the_loader_cannot_see_is_kept);
+    RUN_TEST(name_also_imported_from_the_tree_keeps_its_guess);
+    RUN_TEST(package_subpath_spelling_no_project_path_is_not_guessed);
     import_resolution_teardown();
 }

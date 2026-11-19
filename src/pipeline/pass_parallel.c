@@ -1228,9 +1228,9 @@ static const ctx_gbuf_node_t *find_source_node(const ctx_gbuf_t *gbuf, const cha
     return src;
 }
 
-/* The local names a file imports only from packages (T-jnpg). */
+/* What a file imports only from packages (T-jnpg). */
 typedef struct {
-    const char **names;
+    ctx_external_import_t *items;
     int count;
 } pp_externals_t;
 
@@ -1272,7 +1272,8 @@ static void resolve_file_calls(resolve_ctx_t *rc, resolve_worker_state_t *ws, Ct
         bool bind_plain = ctx_registry_admits_member_call(rc->registry, lang, call->callee_name,
                                                           &res, &result->imports) &&
                           ctx_registry_admits_bare_call(lang, call->callee_name, &res,
-                                                        externals->names, externals->count);
+                                                        target_node->file_path, externals->items,
+                                                        externals->count);
         emit_service_edge(ws->local_edge_buf, source_node, target_node, call, &res, bind_plain,
                           module_qn, rc->registry, rc->main_gbuf, imp_keys, imp_vals, imp_count);
         if (bind_plain) {
@@ -1488,7 +1489,7 @@ static void resolve_worker(int worker_id, void *ctx_ptr) {
         int imp_count = 0;
         pp_externals_t externals = {0};
         ctx_pipeline_import_map_with_externals(rc->pipeline_ctx, rel, result, &imp_keys, &imp_vals,
-                                               &imp_count, &externals.names, &externals.count);
+                                               &imp_count, &externals.items, &externals.count);
 
         char *module_qn = ctx_pipeline_fqn_module(rc->project_name, rel);
 
@@ -1510,7 +1511,7 @@ static void resolve_worker(int worker_id, void *ctx_ptr) {
 
         free(module_qn);
         free_import_map(imp_keys, imp_vals, imp_count);
-        free((void *)externals.names);
+        free(externals.items);
     }
 }
 

@@ -463,6 +463,20 @@ static void walk_dir(const char *dir_path, const char *rel_prefix, const ctx_dis
 
 /* ── Public API ──────────────────────────────────────────────────── */
 
+ctx_gitignore_t *ctx_discover_root_gitignore(const char *repo_path) {
+    if (!repo_path) {
+        return NULL;
+    }
+    char path[CTX_SZ_4K];
+    snprintf(path, sizeof(path), "%s/.git", repo_path);
+    struct stat st;
+    if (stat(path, &st) != 0 || !S_ISDIR(st.st_mode)) {
+        return NULL;
+    }
+    snprintf(path, sizeof(path), "%s/.gitignore", repo_path);
+    return ctx_gitignore_load(path);
+}
+
 int ctx_discover(const char *repo_path, const ctx_discover_opts_t *opts, ctx_file_info_t **out,
                  int *count) {
     if (!repo_path || !out || !count) {
@@ -478,15 +492,8 @@ int ctx_discover(const char *repo_path, const ctx_discover_opts_t *opts, ctx_fil
         return CTX_NOT_FOUND;
     }
 
-    /* Load gitignore if .git directory exists */
-    ctx_gitignore_t *gitignore = NULL;
+    ctx_gitignore_t *gitignore = ctx_discover_root_gitignore(repo_path);
     char gi_path[CTX_SZ_4K];
-    snprintf(gi_path, sizeof(gi_path), "%s/.git", repo_path);
-    struct stat gi_stat;
-    if (stat(gi_path, &gi_stat) == 0 && S_ISDIR(gi_stat.st_mode)) {
-        snprintf(gi_path, sizeof(gi_path), "%s/.gitignore", repo_path);
-        gitignore = ctx_gitignore_load(gi_path);
-    }
 
     /* Load ctxignore if specified or exists at repo root */
     ctx_gitignore_t *ctxignore = NULL;

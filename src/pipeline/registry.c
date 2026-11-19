@@ -875,9 +875,9 @@ bool ctx_registry_admits_member_call(const ctx_registry_t *r, CtxLanguage lang,
 /* ── Bare calls to package imports (T-jnpg) ──────────────────────── */
 
 bool ctx_registry_admits_bare_call(CtxLanguage lang, const char *callee_name,
-                                   const ctx_resolution_t *res, const char *const *external_names,
-                                   int external_count) {
-    if (!lang_has_member_call_rule(lang) || !callee_name || !res || !external_names ||
+                                   const ctx_resolution_t *res, const char *target_file,
+                                   const ctx_external_import_t *externals, int external_count) {
+    if (!lang_has_member_call_rule(lang) || !callee_name || !res || !externals ||
         external_count <= 0) {
         return true;
     }
@@ -886,12 +886,21 @@ bool ctx_registry_admits_bare_call(CtxLanguage lang, const char *callee_name,
     }
     /* An exact match on the whole callee: a member call (`render.x()`) never
      * equals an imported local name, and has its own rule. */
+    bool external = false;
     for (int i = 0; i < external_count; i++) {
-        if (external_names[i] && strcmp(external_names[i], callee_name) == 0) {
-            return false;
+        if (!externals[i].name || strcmp(externals[i].name, callee_name) != 0) {
+            continue;
         }
+        /* A guess that lands where the specifier spells is where a bundler
+         * alias the loader cannot see points: `@utils/money`, guessed onto
+         * src/utils/money.js. */
+        if (target_file &&
+            ctx_path_aliases_specifier_names_file(externals[i].specifier, target_file)) {
+            return true;
+        }
+        external = true;
     }
-    return true;
+    return !external;
 }
 
 /* ── Fuzzy Resolve ──────────────────────────────────────────────── */
