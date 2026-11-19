@@ -40,6 +40,8 @@ static const char *ALWAYS_SKIP_DIRS[] = {
     ".ccls-cache", ".clangd", "elm-stuff", "_opam", ".cpcache", ".shadow-cljs",
     /* Deploy */
     ".vercel", ".netlify",
+    /* Cortex's own state: its graph, staleness and quality reports, logs */
+    ".cortex",
     /* Misc */
     ".qdrant_code_embeddings", ".tmp", "vendor", NULL};
 
@@ -98,7 +100,8 @@ static const char *IGNORED_JSON_FILES[] = {
     "turbo.json",         ".stylelintrc.json", "pnpm-lock.json",
     "deno.json",          "biome.json",        "devcontainer.json",
     ".devcontainer.json", "launch.json",       "settings.json",
-    "extensions.json",    "tasks.json",        NULL};
+    "extensions.json",    "tasks.json",        "cortex.json",
+    NULL};
 
 /* ── Helper: check if string is in NULL-terminated array ─────────── */
 

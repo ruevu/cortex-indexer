@@ -17,6 +17,11 @@ TEST(skip_node_modules) {
     ASSERT_TRUE(ctx_should_skip_dir("node_modules", CTX_MODE_FULL));
     PASS();
 }
+/* Cortex's own state directory is never project source. */
+TEST(skip_cortex_state) {
+    ASSERT_TRUE(ctx_should_skip_dir(".cortex", CTX_MODE_FULL));
+    PASS();
+}
 TEST(skip_pycache) {
     ASSERT_TRUE(ctx_should_skip_dir("__pycache__", CTX_MODE_FULL));
     PASS();
@@ -299,6 +304,65 @@ TEST(discover_skips_git_dir) {
     int rc = ctx_discover(base, &opts, &files, &count);
     ASSERT_EQ(rc, 0);
     ASSERT_EQ(count, 1);
+
+    ctx_discover_free(files, count);
+    th_cleanup(base);
+    PASS();
+}
+
+/* Cortex writes `.cortex/` (its graph, staleness.json, logs) and `cortex.json`
+ * into every repo it indexes. A repo whose .gitignore doesn't name them, or a
+ * linked worktree, must still not see them in its own graph. */
+TEST(discover_skips_cortex_files) {
+    char *base = th_mktempdir("ctx_disc_cortex");
+    ASSERT(base != NULL);
+
+    th_write_file(TH_PATH(base, ".cortex/staleness.json"), "{\"swept\":1}\n");
+    th_write_file(TH_PATH(base, ".cortex/quality.json"), "{\"verdict\":\"ok\"}\n");
+    th_write_file(TH_PATH(base, "cortex.json"), "{\"repoId\":\"x\"}\n");
+    th_write_file(TH_PATH(base, "src/main.go"), "package main\n");
+
+    ctx_discover_opts_t opts = {0};
+    ctx_file_info_t *files = NULL;
+    int count = 0;
+
+    int rc = ctx_discover(base, &opts, &files, &count);
+    ASSERT_EQ(rc, 0);
+    ASSERT_EQ(count, 1);
+    ASSERT_STR_EQ(files[0].rel_path, "src/main.go");
+
+    ctx_discover_free(files, count);
+    th_cleanup(base);
+    PASS();
+}
+
+/* .mjs/.cjs are JavaScript and .mts/.cts TypeScript: all four are found. */
+TEST(discover_finds_module_system_variants) {
+    char *base = th_mktempdir("ctx_disc_modexts");
+    ASSERT(base != NULL);
+
+    th_write_file(TH_PATH(base, "scripts/build.mjs"), "export function build() {}\n");
+    th_write_file(TH_PATH(base, "scripts/sync.cjs"), "module.exports = {};\n");
+    th_write_file(TH_PATH(base, "lib/clock.mts"), "export const n = 1;\n");
+    th_write_file(TH_PATH(base, "lib/old.cts"), "export const m = 2;\n");
+
+    ctx_discover_opts_t opts = {0};
+    ctx_file_info_t *files = NULL;
+    int count = 0;
+
+    int rc = ctx_discover(base, &opts, &files, &count);
+    ASSERT_EQ(rc, 0);
+    ASSERT_EQ(count, 4);
+
+    int js = 0, ts = 0;
+    for (int i = 0; i < count; i++) {
+        if (files[i].language == CTX_LANG_JAVASCRIPT)
+            js++;
+        if (files[i].language == CTX_LANG_TYPESCRIPT)
+            ts++;
+    }
+    ASSERT_EQ(js, 2);
+    ASSERT_EQ(ts, 2);
 
     ctx_discover_free(files, count);
     th_cleanup(base);
@@ -675,6 +739,7 @@ SUITE(discover) {
     /* Directory skip — always */
     RUN_TEST(skip_git);
     RUN_TEST(skip_node_modules);
+    RUN_TEST(skip_cortex_state);
     RUN_TEST(skip_pycache);
     RUN_TEST(skip_venv);
     RUN_TEST(skip_dist);
@@ -742,6 +807,8 @@ SUITE(discover) {
     /* Integration tests (cross-platform) */
     RUN_TEST(discover_simple);
     RUN_TEST(discover_skips_git_dir);
+    RUN_TEST(discover_skips_cortex_files);
+    RUN_TEST(discover_finds_module_system_variants);
     RUN_TEST(discover_with_gitignore);
     RUN_TEST(discover_max_file_size);
     RUN_TEST(discover_null_path);
