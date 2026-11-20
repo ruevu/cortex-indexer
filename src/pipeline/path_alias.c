@@ -28,15 +28,17 @@
 
 enum {
     PA_MAX_CONFIGS = 1024,         /* config files kept from one repo walk */
-    PA_MAX_WALK_DEPTH = 32,        /* directory recursion */
     PA_MAX_EXTENDS_DEPTH = 16,     /* `extends` hops */
     PA_MAX_EXTENDS_LOADS = 64,     /* config files read for one project, bases included */
     PA_MAX_TARGETS = CTX_PATH_ALIAS_MAX_TARGETS,
     PA_MAX_FILE_BYTES = 1 << 20,   /* a tsconfig larger than this is skipped */
     PA_PATH_MAX = 1024,
-    PA_MAX_PACKAGES = 4096,        /* workspace package names kept from one repo walk */
-    PA_MAX_BASE_ENTRIES = 4096,    /* entries listed under one baseUrl */
+    /* Name sets filled by one repo walk. Each holds at least half its size in
+     * distinct names, whatever the duplicates (pa_names_add). */
+    PA_MAX_PACKAGES = 8192,        /* names the tree imports its own packages by */
+    PA_MAX_DECLARED = 8192,        /* dependency keys taken from outside the tree */
     PA_MAX_ALIAS_KEYS = 4096,      /* `paths` keys kept from configs no scope reads */
+    PA_MAX_BASE_ENTRIES = 4096,    /* entries listed under one baseUrl */
 };
 
 typedef struct {
@@ -63,6 +65,7 @@ typedef struct {
 typedef struct {
     char **items;
     int count;
+    bool closed; /* a seal left it over half full: pa_names_add takes no more */
 } pa_names_t;
 
 typedef struct {
@@ -77,6 +80,7 @@ struct ctx_path_aliases {
     pa_scope_t *scopes; /* deepest directory first */
     int count;
     pa_names_t packages;   /* package.json names, and keys of dependencies in the tree */
+    pa_names_t declared;   /* keys of dependencies from outside the tree: the externals */
     pa_names_t alias_keys; /* `paths` keys of the configs no scope reads */
     bool incomplete;       /* the walk stopped at a cap: claims every package */
 };
@@ -179,6 +183,27 @@ static void pa_names_free(pa_names_t *ns) {
     }
     free(ns->items);
     *ns = (pa_names_t){0};
+}
+
+/* A copy of s into ns, whose items hold cap. Sets filled from manifests are
+ * mostly duplicates (every package.json repeats the names it depends on), so
+ * a full set is sealed first, which drops them. A seal that leaves the set
+ * over half full closes it: what no longer fits is refused, false, and no set
+ * is sealed again within cap/2 adds. */
+static bool pa_names_add(pa_names_t *ns, int cap, const char *s) {
+    if (!ns->items) {
+        return false;
+    }
+    if (ns->count == cap && !ns->closed) {
+        pa_names_seal(ns);
+        ns->closed = ns->count > cap / 2;
+    }
+    char *copy = ns->count < cap ? strdup(s) : NULL;
+    if (!copy) {
+        return false;
+    }
+    ns->items[ns->count++] = copy;
+    return true;
 }
 
 /* ── Patterns ────────────────────────────────────────────────────── */
@@ -401,27 +426,29 @@ typedef struct {
     char **configs; /* repo-relative paths */
     int count;
     pa_names_t packages;   /* capacity PA_MAX_PACKAGES */
+    pa_names_t declared;   /* capacity PA_MAX_DECLARED */
     pa_names_t alias_keys; /* capacity PA_MAX_ALIAS_KEYS */
     bool truncated;        /* something the walk would have kept was left out */
 } pa_walk_t;
 
-/* A copy of s into ns, which holds at most cap. What does not fit truncates
- * the walk. */
+/* A name the claim rules count on: one that does not fit truncates the walk,
+ * which then claims every package. */
 static void pa_walk_keep(pa_walk_t *w, pa_names_t *ns, int cap, const char *s) {
-    char *copy = ns->items && ns->count < cap ? strdup(s) : NULL;
-    if (!copy) {
+    if (!pa_names_add(ns, cap, s)) {
         w->truncated = true;
-        return;
     }
-    ns->items[ns->count++] = copy;
 }
 
-/* What a package.json in rel_dir lets the tree import by a package name,
- * kept in w->packages: its `name`, a workspace package's; and each
- * dependency key whose version points into the tree (`file:`, `link:`,
- * `portal:`, `workspace:`), which the code imports by that key whatever the
- * package there calls itself. node_modules is never walked, so a
- * dependency's own manifest adds nothing. */
+/* What a package.json in rel_dir says about package names:
+ *   - in w->packages, what the tree imports its own code by: the manifest's
+ *     `name`, a workspace package's; and each dependency key whose version
+ *     points into the tree (`file:`, `link:`, `portal:`, `workspace:`), which
+ *     the code imports by that key whatever the package there calls itself;
+ *   - in w->declared, every other dependency key: a package taken from
+ *     outside the tree (a registry range, `npm:`, a git URL, `catalog:`), the
+ *     evidence that a specifier naming it is external. One that does not fit
+ *     is dropped, and stays claimed.
+ * node_modules is never walked, so a dependency's own manifest adds nothing. */
 static void pa_collect_package(pa_walk_t *w, const char *rel_dir) {
     char *rel = pa_join(rel_dir, "package.json");
     yyjson_doc *doc = rel && pa_exists(w->repo, rel) ? pa_read_json(w->repo, rel) : NULL;
@@ -444,12 +471,17 @@ static void pa_collect_package(pa_walk_t *w, const char *rel_dir) {
         while (yyjson_is_obj(deps) && (key = yyjson_obj_iter_next(&iter)) != NULL) {
             const char *dep = yyjson_get_str(key);
             const char *version = yyjson_get_str(yyjson_obj_iter_get_val(key));
-            for (size_t l = 0; dep && dep[0] && version && l < sizeof(local) / sizeof(local[0]);
-                 l++) {
-                if (strncmp(version, local[l], strlen(local[l])) == 0) {
-                    pa_walk_keep(w, &w->packages, PA_MAX_PACKAGES, dep);
-                    break;
-                }
+            if (!dep || !dep[0] || !version) {
+                continue;
+            }
+            bool in_tree = false;
+            for (size_t l = 0; !in_tree && l < sizeof(local) / sizeof(local[0]); l++) {
+                in_tree = strncmp(version, local[l], strlen(local[l])) == 0;
+            }
+            if (in_tree) {
+                pa_walk_keep(w, &w->packages, PA_MAX_PACKAGES, dep);
+            } else {
+                (void)pa_names_add(&w->declared, PA_MAX_DECLARED, dep);
             }
         }
     }
@@ -489,13 +521,37 @@ static void pa_collect_alias_keys(pa_walk_t *w, const char *rel_dir, const char 
     yyjson_doc_free(doc);
 }
 
-static void pa_walk(pa_walk_t *w, const char *rel_dir, int depth) {
-    if (w->count >= PA_MAX_CONFIGS || depth > PA_MAX_WALK_DEPTH) {
+/* Directories the walk has yet to visit, repo-relative and owned. */
+typedef struct {
+    char **items;
+    int count;
+    int cap;
+} pa_stack_t;
+
+static void pa_stack_push(pa_walk_t *w, pa_stack_t *stack, char *rel_dir) {
+    if (stack->count == stack->cap) {
+        int cap = stack->cap ? stack->cap * 2 : 64;
+        char **grown = realloc(stack->items, (size_t)cap * sizeof(char *));
+        if (!grown) {
+            free(rel_dir);
+            w->truncated = true;
+            return;
+        }
+        stack->items = grown;
+        stack->cap = cap;
+    }
+    stack->items[stack->count++] = rel_dir;
+}
+
+/* One directory: its config, its package.json, the configs beside it no scope
+ * reads; its subdirectories are pushed for later. */
+static void pa_walk_dir(pa_walk_t *w, const char *rel_dir, pa_stack_t *stack) {
+    char abs[PA_PATH_MAX];
+    int n = snprintf(abs, sizeof(abs), "%s%s%s", w->repo, rel_dir[0] ? "/" : "", rel_dir);
+    if (n <= 0 || (size_t)n >= sizeof(abs)) {
         w->truncated = true;
         return;
     }
-    char abs[PA_PATH_MAX];
-    snprintf(abs, sizeof(abs), "%s%s%s", w->repo, rel_dir[0] ? "/" : "", rel_dir);
     static const char *const names[] = {"tsconfig.json", "jsconfig.json"};
     const char *scoped = NULL; /* the config this directory's scope reads */
     for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
@@ -514,10 +570,6 @@ static void pa_walk(pa_walk_t *w, const char *rel_dir, int depth) {
     }
     ctx_dirent_t *ent;
     while ((ent = ctx_readdir(d)) != NULL) {
-        if (w->count >= PA_MAX_CONFIGS) {
-            w->truncated = true;
-            break;
-        }
         if (!ent->is_dir) {
             if (pa_is_config_name(ent->name) && !(scoped && strcmp(ent->name, scoped) == 0)) {
                 pa_collect_alias_keys(w, rel_dir, ent->name);
@@ -528,12 +580,40 @@ static void pa_walk(pa_walk_t *w, const char *rel_dir, int depth) {
             continue;
         }
         char *child = pa_join(rel_dir, ent->name);
-        if (child && !(w->gitignore && ctx_gitignore_matches(w->gitignore, child, true))) {
-            pa_walk(w, child, depth + 1);
+        if (!child) {
+            w->truncated = true; /* a path too long to keep */
+            continue;
         }
-        free(child);
+        if (w->gitignore && ctx_gitignore_matches(w->gitignore, child, true)) {
+            free(child);
+            continue;
+        }
+        pa_stack_push(w, stack, child);
     }
     ctx_closedir(d);
+}
+
+/* The whole tree, however deep, as discovery walks it: with a stack on the
+ * heap, not recursion, so depth costs no C stack. Only the config cap stops
+ * it early. */
+static void pa_walk(pa_walk_t *w) {
+    pa_stack_t stack = {0};
+    char *root = strdup("");
+    if (!root) {
+        w->truncated = true;
+        return;
+    }
+    pa_stack_push(w, &stack, root);
+    while (stack.count > 0) {
+        char *rel_dir = stack.items[--stack.count];
+        if (w->count < PA_MAX_CONFIGS) {
+            pa_walk_dir(w, rel_dir, &stack);
+        } else {
+            w->truncated = true;
+        }
+        free(rel_dir);
+    }
+    free(stack.items);
 }
 
 static int pa_scope_deeper_first(const void *a, const void *b) {
@@ -591,6 +671,7 @@ void ctx_path_aliases_free(ctx_path_aliases_t *aliases) {
     }
     free(aliases->scopes);
     pa_names_free(&aliases->packages);
+    pa_names_free(&aliases->declared);
     pa_names_free(&aliases->alias_keys);
     free(aliases);
 }
@@ -602,16 +683,18 @@ ctx_path_aliases_t *ctx_path_aliases_load(const char *repo_path) {
     pa_walk_t w = {.repo = repo_path,
                    .configs = calloc(PA_MAX_CONFIGS, sizeof(char *)),
                    .packages = {.items = calloc(PA_MAX_PACKAGES, sizeof(char *))},
+                   .declared = {.items = calloc(PA_MAX_DECLARED, sizeof(char *))},
                    .alias_keys = {.items = calloc(PA_MAX_ALIAS_KEYS, sizeof(char *))}};
     if (!w.configs) {
         pa_names_free(&w.packages);
+        pa_names_free(&w.declared);
         pa_names_free(&w.alias_keys);
         return NULL;
     }
     /* What discovery walks, so that a package it indexes is one the tree
      * declares: the root .gitignore applies only where discovery applies it. */
     w.gitignore = ctx_discover_root_gitignore(repo_path);
-    pa_walk(&w, "", 0);
+    pa_walk(&w);
     ctx_gitignore_free(w.gitignore);
     if (w.count >= PA_MAX_CONFIGS) {
         ctx_log_warn("path_alias.configs.cap_hit", "repo", repo_path);
@@ -620,6 +703,7 @@ ctx_path_aliases_t *ctx_path_aliases_load(const char *repo_path) {
         ctx_log_warn("path_alias.walk.truncated", "repo", repo_path);
     }
     pa_names_seal(&w.packages);
+    pa_names_seal(&w.declared);
     pa_names_seal(&w.alias_keys);
 
     ctx_path_aliases_t *aliases = calloc(1, sizeof(*aliases));
@@ -652,14 +736,17 @@ ctx_path_aliases_t *ctx_path_aliases_load(const char *repo_path) {
     free(w.configs);
     if (aliases) {
         aliases->packages = w.packages;
+        aliases->declared = w.declared;
         aliases->alias_keys = w.alias_keys;
         aliases->incomplete = w.truncated;
         w.packages = (pa_names_t){0};
+        w.declared = (pa_names_t){0};
         w.alias_keys = (pa_names_t){0};
-        any = any || aliases->packages.count > 0 || aliases->alias_keys.count > 0 ||
-              aliases->incomplete;
+        any = any || aliases->packages.count > 0 || aliases->declared.count > 0 ||
+              aliases->alias_keys.count > 0 || aliases->incomplete;
     }
     pa_names_free(&w.packages);
+    pa_names_free(&w.declared);
     pa_names_free(&w.alias_keys);
     if (!any) {
         ctx_path_aliases_free(aliases);
@@ -787,17 +874,50 @@ static bool pa_npm_segment(const char *s, size_t len) {
     return true;
 }
 
-/* Whether a specifier can name a package at all: a Node, npm, JSR or Bun
- * scheme (`node:path`), or an npm name (`react`, `@scope/pkg`) with any
- * subpath. `~/x`, `@/x`, `#imports`, `$lib/x` and `virtual:x` cannot: they are
- * aliases a framework or bundler resolves, often into the tree, or virtual
- * modules. */
-static bool pa_package_shaped(const char *specifier) {
+/* Whether a specifier starts with a Node, npm, JSR or Bun scheme
+ * (`node:path`, `npm:lodash@4`, `jsr:@std/path`, `bun:test`): a module of the
+ * runtime, or a package fetched by name, never a file of the tree. */
+static bool pa_has_scheme(const char *specifier) {
     static const char *const schemes[] = {"node:", "npm:", "jsr:", "bun:"};
     for (size_t i = 0; i < sizeof(schemes) / sizeof(schemes[0]); i++) {
         if (strncmp(specifier, schemes[i], strlen(schemes[i])) == 0) {
             return true;
         }
+    }
+    return false;
+}
+
+/* Whether a specifier names a module of the runtime, which no manifest
+ * declares: a scheme, Bun's `bun`, or a Node builtin by its bare name, whole or
+ * with a subpath (`fs/promises`). The builtins are Node 26's
+ * `module.builtinModules`, less the internal `_` ones. */
+static bool pa_runtime_module(const char *specifier) {
+    static const char *const builtins[] = {
+        "assert", "async_hooks", "buffer", "child_process", "cluster", "console", "constants",
+        "crypto", "dgram", "diagnostics_channel", "dns", "domain", "events", "fs", "http",
+        "http2", "https", "inspector", "module", "net", "os", "path", "perf_hooks", "process",
+        "punycode", "querystring", "readline", "repl", "stream", "string_decoder", "sys",
+        "timers", "tls", "trace_events", "tty", "url", "util", "v8", "vm", "wasi",
+        "worker_threads", "zlib", "bun"};
+    if (pa_has_scheme(specifier)) {
+        return true;
+    }
+    size_t len = strcspn(specifier, "/");
+    for (size_t i = 0; i < sizeof(builtins) / sizeof(builtins[0]); i++) {
+        if (strlen(builtins[i]) == len && strncmp(specifier, builtins[i], len) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/* Whether a specifier can name a package at all: a scheme (pa_has_scheme), or
+ * an npm name (`react`, `@scope/pkg`) with any subpath. `~/x`, `@/x`,
+ * `#imports`, `$lib/x` and `virtual:x` cannot: they are aliases a framework or
+ * bundler resolves, often into the tree, or virtual modules. */
+static bool pa_package_shaped(const char *specifier) {
+    if (pa_has_scheme(specifier)) {
+        return true;
     }
     const char *name = specifier;
     if (specifier[0] == '@') {
@@ -833,6 +953,23 @@ static bool pa_names_package(const ctx_path_aliases_t *aliases, const char *spec
         }
         *slash = '\0';
     }
+}
+
+/* Whether a manifest in the tree takes the specifier's package from outside
+ * it: `react` for `react/jsx-runtime`, `@scope/pkg` for `@scope/pkg/sub`. */
+static bool pa_declares_package(const ctx_path_aliases_t *aliases, const char *specifier) {
+    const char *end = strchr(specifier, '/');
+    if (specifier[0] == '@' && end) {
+        end = strchr(end + 1, '/');
+    }
+    size_t len = end ? (size_t)(end - specifier) : strlen(specifier);
+    char name[PA_PATH_MAX];
+    if (aliases->declared.count == 0 || len >= sizeof(name)) {
+        return false;
+    }
+    memcpy(name, specifier, len);
+    name[len] = '\0';
+    return pa_names_has(&aliases->declared, name);
 }
 
 /* Whether baseUrl reaches something real for the specifier: its first
@@ -895,24 +1032,24 @@ bool ctx_path_aliases_claims(const ctx_path_aliases_t *aliases, const char *sour
     if (!pa_package_shaped(specifier)) {
         return true;
     }
-    if (!aliases) {
-        return false;
+    if (aliases) {
+        /* A walk that stopped at a cap missed what it would have claimed. */
+        if (aliases->incomplete || pa_names_package(aliases, specifier) ||
+            pa_unscoped_key_matches(aliases, specifier)) {
+            return true;
+        }
+        const pa_scope_t *scope = pa_scope_for(aliases, source_rel);
+        size_t star_start = 0;
+        size_t star_len = 0;
+        if (scope && (pa_best_pattern(&scope->paths, specifier, &star_start, &star_len) ||
+                      pa_base_reaches(scope, specifier))) {
+            return true;
+        }
     }
-    /* A walk that stopped at a cap missed what it would have claimed. */
-    if (aliases->incomplete || pa_names_package(aliases, specifier) ||
-        pa_unscoped_key_matches(aliases, specifier)) {
-        return true;
-    }
-    const pa_scope_t *scope = pa_scope_for(aliases, source_rel);
-    if (!scope) {
-        return false;
-    }
-    size_t star_start = 0;
-    size_t star_len = 0;
-    if (pa_best_pattern(&scope->paths, specifier, &star_start, &star_len)) {
-        return true;
-    }
-    return pa_base_reaches(scope, specifier);
+    /* Nothing in the tree holds it, which proves nothing: an alias no config
+     * declares reads the same. External only when something says so. */
+    return !pa_runtime_module(specifier) &&
+           !(aliases && pa_declares_package(aliases, specifier));
 }
 
 /* Whether s is two or more segments, none empty. */

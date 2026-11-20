@@ -73,7 +73,15 @@ static int setup_pa_repo(void) {
         /* Workspace packages the tree declares, and one it only depends on. */
         {"libs/kit/package.json", "{ \"name\": \"@acme/kit\", \"version\": \"1.0.0\" }\n"},
         {"tools/cli/package.json", "{ \"name\": \"acme-cli\" }\n"},
-        {"package.json", "{ \"private\": true }\n"},
+        /* What the tree takes from the registry: the packages the tests below
+         * expect to stay external, near-misses of its own names among them. */
+        {"package.json", "{ \"private\": true,\n"
+                         "  \"dependencies\": { \"react\": \"^18.0.0\", \"antd\": \"^5.0.0\",\n"
+                         "    \"@scope/pkg\": \"^1.0.0\", \"JSONStream\": \"^1.3.5\",\n"
+                         "    \"lodash.debounce\": \"^4.0.8\" },\n"
+                         "  \"devDependencies\": { \"@acme/other\": \"^1.0.0\",\n"
+                         "    \"@acme/ki\": \"^1.0.0\", \"acme-cli-extra\": \"^1.0.0\",\n"
+                         "    \"@x/ui\": \"^1.0.0\", \"@sharedx/strings\": \"^1.0.0\" } }\n"},
         {"node_modules/antd/package.json", "{ \"name\": \"antd\" }\n"},
         /* Vite's template: the project's config only references the app's,
          * which holds the aliases; the loader scopes a config by directory,
@@ -266,11 +274,42 @@ TEST(specifier_no_package_can_have_is_claimed) {
         ASSERT_TRUE(ctx_path_aliases_claims(g_pa, "web/app.ts", aliases_only[i]));
         ASSERT_TRUE(ctx_path_aliases_claims(NULL, "web/app.ts", aliases_only[i]));
     }
-    /* Package names, scoped or legacy-capitalised, and Node's builtins. */
+    /* Package names, scoped or legacy-capitalised, that the tree depends on;
+     * and Node's builtins. */
     const char *packages[] = {"react", "@scope/pkg/sub", "JSONStream", "lodash.debounce",
                               "node:path", "fs"};
     for (size_t i = 0; i < sizeof(packages) / sizeof(packages[0]); i++) {
-        ASSERT_FALSE(ctx_path_aliases_claims(NULL, "web/app.ts", packages[i]));
+        ASSERT_FALSE(ctx_path_aliases_claims(g_pa, "apps/main.ts", packages[i]));
+    }
+    PASS();
+}
+
+/* External must be proven: a package-shaped specifier is a package only when a
+ * manifest in the tree depends on that package from outside the tree, or it
+ * names the runtime. Anything else may be an alias a bundler resolves into
+ * the tree, which no config here declares: a webpack key cased unlike its
+ * directory (`Utilities/`), a key that spells no path (`@app/` for src/), one
+ * segment (`test-utils`, Jest's moduleDirectories), a Deno import map, which
+ * keeps the extension. */
+TEST(undeclared_package_is_claimed) {
+    ASSERT_EQ(ensure_pa(), 0);
+    const char *undeclared[] = {"Utilities/utility", "@app/utils/foo", "test-utils",
+                                "utils/greet.ts",    "@core/x",        "react-dom"};
+    for (size_t i = 0; i < sizeof(undeclared) / sizeof(undeclared[0]); i++) {
+        ASSERT_TRUE(ctx_path_aliases_claims(g_pa, "apps/main.ts", undeclared[i]));
+        ASSERT_TRUE(ctx_path_aliases_claims(NULL, "apps/main.ts", undeclared[i]));
+    }
+    /* Declared by the root manifest or by app/'s, whole or as a subpath. */
+    const char *declared[] = {"react", "react/jsx-runtime", "@scope/pkg/sub", "left-pad"};
+    for (size_t i = 0; i < sizeof(declared) / sizeof(declared[0]); i++) {
+        ASSERT_FALSE(ctx_path_aliases_claims(g_pa, "apps/main.ts", declared[i]));
+    }
+    /* The runtime's own modules need no manifest. */
+    const char *runtime[] = {"node:path", "fs",  "fs/promises",  "child_process",
+                             "bun:test",  "bun", "npm:lodash@4", "jsr:@std/path"};
+    for (size_t i = 0; i < sizeof(runtime) / sizeof(runtime[0]); i++) {
+        ASSERT_FALSE(ctx_path_aliases_claims(g_pa, "apps/main.ts", runtime[i]));
+        ASSERT_FALSE(ctx_path_aliases_claims(NULL, "apps/main.ts", runtime[i]));
     }
     PASS();
 }
@@ -339,14 +378,18 @@ static ctx_path_aliases_t *pa_load_tree(char *dir, size_t dir_size, const char *
 TEST(gitignored_package_counts_where_discovery_indexes_it) {
     ASSERT_EQ(ensure_pa(), 0);
     ASSERT_TRUE(ctx_path_aliases_claims(g_pa, "apps/main.ts", "@acme/client"));
+    /* The root depends on both by a registry range, as npm workspaces do: a
+     * package the walk does not see would be judged external. */
     static const char *const files[][2] = {
         {".gitignore", "generated/\n"},
+        {"package.json", "{ \"dependencies\": { \"@acme/client\": \"^1.0.0\",\n"
+                         "  \"@acme/tools\": \"^1.0.0\" } }\n"},
         {"generated/client/package.json", "{ \"name\": \"@acme/client\" }\n"},
         {"tools/package.json", "{ \"name\": \"@acme/tools\" }\n"},
     };
     for (int git = 1; git <= 2; git++) {
         char dir[256];
-        ctx_path_aliases_t *a = pa_load_tree(dir, sizeof(dir), files, 3, git);
+        ctx_path_aliases_t *a = pa_load_tree(dir, sizeof(dir), files, 4, git);
         bool loaded = a != NULL;
         bool tools = ctx_path_aliases_claims(a, "apps/main.ts", "@acme/tools");
         bool client = ctx_path_aliases_claims(a, "apps/main.ts", "@acme/client");
@@ -363,11 +406,22 @@ TEST(gitignored_package_counts_where_discovery_indexes_it) {
 
 /* A walk that stops at a cap has missed configs and packages it would have
  * claimed, so it claims every package-shaped specifier: the rule never cuts
- * what it could not see. 1100 projects is past the 1024-config cap. */
+ * what it could not see. 1100 projects is past the 1024-config cap, and the
+ * root depends on each of them, and on react, by a registry range. */
 TEST(walk_stopped_at_a_cap_claims_every_package) {
     char dir[256];
     snprintf(dir, sizeof(dir), "/tmp/ctx_pa_cap_XXXXXX");
     ASSERT_NOT_NULL(ctx_mkdtemp(dir));
+    enum { ROOT_BYTES = 1100 * 32 + 64 };
+    char *root = malloc(ROOT_BYTES);
+    ASSERT_NOT_NULL(root);
+    size_t len = (size_t)snprintf(root, ROOT_BYTES, "{ \"dependencies\": { \"react\": \"^18\"");
+    for (int i = 0; i < 1100; i++) {
+        len += (size_t)snprintf(root + len, ROOT_BYTES - len, ", \"@acme/d%04d\": \"*\"", i);
+    }
+    snprintf(root + len, ROOT_BYTES - len, " } }\n");
+    th_write_file(TH_PATH(dir, "package.json"), root);
+    free(root);
     for (int i = 0; i < 1100; i++) {
         char rel[64];
         char body[96];
@@ -389,6 +443,72 @@ TEST(walk_stopped_at_a_cap_claims_every_package) {
     th_rmtree(dir);
     ASSERT_EQ(unclaimed, 0);
     ASSERT_TRUE(react);
+    PASS();
+}
+
+/* Every manifest repeats the names it depends on: 600 packages that each
+ * depend on 15 siblings write 9,600 names, past what the walk keeps, of 600
+ * packages. The walk keeps names, not mentions, so it is complete, and what
+ * the root takes from the registry stays external. */
+TEST(repeated_dependencies_do_not_stop_the_walk) {
+    char dir[256];
+    snprintf(dir, sizeof(dir), "/tmp/ctx_pa_dup_XXXXXX");
+    ASSERT_NOT_NULL(ctx_mkdtemp(dir));
+    th_write_file(TH_PATH(dir, "package.json"),
+                  "{ \"devDependencies\": { \"react\": \"^18.0.0\" } }\n");
+    enum { PACKAGES = 600, SIBLINGS = 15 };
+    for (int i = 0; i < PACKAGES; i++) {
+        char body[1024];
+        size_t len = (size_t)snprintf(body, sizeof(body),
+                                      "{ \"name\": \"@acme/p%03d\", \"dependencies\": { ", i);
+        for (int s = 1; s <= SIBLINGS; s++) {
+            len += (size_t)snprintf(body + len, sizeof(body) - len,
+                                    "%s\"@acme/p%03d\": \"workspace:*\"", s > 1 ? ", " : "",
+                                    (i + s) % PACKAGES);
+        }
+        snprintf(body + len, sizeof(body) - len, " } }\n");
+        char rel[64];
+        snprintf(rel, sizeof(rel), "p%03d/package.json", i);
+        th_write_file(TH_PATH(dir, rel), body);
+    }
+    ctx_path_aliases_t *a = ctx_path_aliases_load(dir);
+    int claimed = 0;
+    for (int i = 0; i < PACKAGES; i++) {
+        char spec[32];
+        snprintf(spec, sizeof(spec), "@acme/p%03d", i);
+        claimed += ctx_path_aliases_claims(a, "p000/x.ts", spec);
+    }
+    bool react = ctx_path_aliases_claims(a, "p000/x.ts", "react");
+    ctx_path_aliases_free(a);
+    th_rmtree(dir);
+    ASSERT_EQ(claimed, PACKAGES);
+    ASSERT_FALSE(react);
+    PASS();
+}
+
+/* Discovery indexes a directory however deep it sits, and so does the walk:
+ * one deep directory, 40 levels down, leaves the rest of the tree's verdicts
+ * alone. */
+TEST(deep_directory_does_not_stop_the_walk) {
+    char dir[256];
+    snprintf(dir, sizeof(dir), "/tmp/ctx_pa_deep_XXXXXX");
+    ASSERT_NOT_NULL(ctx_mkdtemp(dir));
+    th_write_file(TH_PATH(dir, "package.json"),
+                  "{ \"dependencies\": { \"@deep/pkg\": \"^1.0.0\", \"react\": \"^18.0.0\" } }\n");
+    char rel[256];
+    size_t len = 0;
+    for (int level = 0; level < 40; level++) {
+        len += (size_t)snprintf(rel + len, sizeof(rel) - len, "l%02d/", level);
+    }
+    snprintf(rel + len, sizeof(rel) - len, "package.json");
+    th_write_file(TH_PATH(dir, rel), "{ \"name\": \"@deep/pkg\" }\n");
+    ctx_path_aliases_t *a = ctx_path_aliases_load(dir);
+    bool deep = ctx_path_aliases_claims(a, "app/x.ts", "@deep/pkg");
+    bool react = ctx_path_aliases_claims(a, "app/x.ts", "react");
+    ctx_path_aliases_free(a);
+    th_rmtree(dir);
+    ASSERT_TRUE(deep);
+    ASSERT_FALSE(react);
     PASS();
 }
 
@@ -445,11 +565,14 @@ SUITE(path_alias) {
     RUN_TEST(base_url_claims_what_exists_under_it);
     RUN_TEST(workspace_package_claims_its_name);
     RUN_TEST(specifier_no_package_can_have_is_claimed);
+    RUN_TEST(undeclared_package_is_claimed);
     RUN_TEST(non_script_file_claims_only_relative_specifiers);
     RUN_TEST(alias_key_of_an_unscoped_config_claims_its_specifiers);
     RUN_TEST(local_dependency_claims_its_key);
     RUN_TEST(gitignored_package_counts_where_discovery_indexes_it);
     RUN_TEST(walk_stopped_at_a_cap_claims_every_package);
+    RUN_TEST(repeated_dependencies_do_not_stop_the_walk);
+    RUN_TEST(deep_directory_does_not_stop_the_walk);
     RUN_TEST(overlong_specifier_is_claimed);
     RUN_TEST(specifier_names_the_file_it_spells);
     ctx_path_aliases_free(g_pa);

@@ -47,10 +47,13 @@ enum { CTX_PATH_ALIAS_MAX_TARGETS = 8, CTX_PATH_ALIAS_MAX_CANDIDATES = 9 };
  *   - the `name` of every package.json it passes, and each dependency key
  *     whose version points into the tree (`file:`, `link:`, `portal:`,
  *     `workspace:`);
+ *   - every other dependency key: a package the tree takes from outside it;
  *   - the `paths` keys of every other tsconfig*.json / jsconfig*.json, the
  *     configs no scope reads (Vite's tsconfig.app.json, which the project's
  *     tsconfig.json only references).
- * A walk stopped by a cap marks the result incomplete.
+ * The walk has no depth limit, and keeps names, not mentions: a name listed
+ * by every manifest counts once. A walk stopped by a cap (1024 configs, or a
+ * name set full of distinct names) marks the result incomplete.
  *
  * NULL when the walk found none of these, nor a config with `paths` or
  * `baseUrl`. Free with ctx_path_aliases_free. */
@@ -73,13 +76,19 @@ int ctx_path_aliases_candidates(const ctx_path_aliases_t *aliases, const char *s
                                 const char *specifier, char **out, int max);
 
 /* Whether an import specifier, seen from the file at source_rel, may name
- * code in the tree even when no node was found for it (todo T-jnpg). True for:
+ * code in the tree even when no node was found for it (todo T-jnpg). False —
+ * external — only on evidence, from a script file (ctx_path_aliases_is_script):
+ *   - the runtime: a scheme (`node:path`, `bun:test`, `npm:x`, `jsr:@std/x`),
+ *     Bun's `bun`, or a Node builtin, bare or with a subpath (`fs/promises`);
+ *   - a package some manifest in the tree takes from outside it: a dependency
+ *     key with a registry range, an `npm:` alias, a git URL, `catalog:`,
+ *     matched by the specifier's package (`react` for `react/jsx-runtime`);
+ * and only when nothing in the tree claims it. The tree claims:
  *   - a relative or absolute path (`./x`, `../x`, `/x`), from any file;
- * and, from a script file (ctx_path_aliases_is_script):
  *   - a specifier no package can have: `~/x`, `@/x`, `#imports`, `$lib/x`,
  *     `virtual:x` — an alias some framework or bundler resolves, often into
  *     the tree, with no tsconfig to say so;
- *   - a package the tree declares: a package.json `name` or a dependency key
+ *   - a package the tree holds: a package.json `name` or a dependency key
  *     pointing into the tree, matched whole or as the package of a subpath
  *     (`@acme/kit/src/use` is `@acme/kit`);
  *   - a specifier the file's `paths` match, or the `paths` of any config no
@@ -88,10 +97,13 @@ int ctx_path_aliases_candidates(const ctx_path_aliases_t *aliases, const char *s
  *     baseUrl;
  *   - any package-shaped specifier, when the walk was incomplete or the
  *     specifier is too long to look up.
- * Everything else — `react`, `@scope/pkg`, `node:path` — is a package the tree
- * does not hold. Permissive by construction: a wrong `true` keeps a guessed
- * call edge, a wrong `false` would drop a real one. NULL aliases (the walk
- * found nothing) leaves the path and shape rules. */
+ * Everything else is claimed too: an alias no config declares (webpack's
+ * `Utilities/`, babel's `@app/`, Jest's `test-utils`, a Deno import map) reads
+ * exactly like a package nobody depends on. A non-script file, whose calls
+ * the rule never judges, claims only paths. Permissive by construction: a
+ * wrong `true` keeps a
+ * guessed call edge, a wrong `false` would drop a real one. NULL aliases (the
+ * walk found nothing) leaves the path, shape and runtime rules. */
 bool ctx_path_aliases_claims(const ctx_path_aliases_t *aliases, const char *source_rel,
                              const char *specifier);
 

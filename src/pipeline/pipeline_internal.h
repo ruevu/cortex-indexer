@@ -80,8 +80,9 @@ void ctx_pipeline_import_map_from_result(const ctx_pipeline_ctx_t *ctx, const ch
                                          const char ***out_vals, int *out_count);
 
 /* A local name a script file imports from a specifier that names no node
- * and that nothing in the tree claims (todo T-jnpg): `render` from
- * '@testing-library/react'. Both strings are borrowed. */
+ * and that nothing in the tree claims, a package the tree depends on or the
+ * runtime's (todo T-jnpg): `render` from '@testing-library/react'. Both
+ * strings are borrowed. */
 typedef struct {
     const char *name;
     const char *specifier;
@@ -90,8 +91,10 @@ typedef struct {
 /* ctx_pipeline_import_map_from_result, plus the file's external imports
  * (todo T-jnpg): in a script file, each local name imported from a specifier
  * that names no node and that nothing in the tree claims
- * (ctx_path_aliases_claims) — `render` from '@testing-library/react',
- * `resolve` from 'node:path' — with that specifier. A name with any in-tree
+ * (ctx_path_aliases_claims: proven external, a package some manifest takes
+ * from outside the tree or the runtime's) — `render` from
+ * '@testing-library/react', `resolve` from 'node:path' — with that
+ * specifier. A name with any in-tree
  * import is not external. The strings are borrowed from result; the caller
  * frees only the array. NULL out_externals asks for the map alone. */
 void ctx_pipeline_import_map_with_externals(const ctx_pipeline_ctx_t *ctx, const char *source_rel,
@@ -402,8 +405,8 @@ bool ctx_registry_admits_member_call(const ctx_registry_t *r, CtxLanguage lang,
  * resolved it (todo T-jnpg). In JavaScript, TypeScript, TSX, Vue and Svelte it
  * is refused when the strategy guessed by name alone (unique_name,
  * suffix_match, fuzzy) and the calling file imports the callee only from
- * package specifiers: names nothing in the tree claims (see
- * ctx_path_aliases_claims). `render()` imported from '@testing-library/react'
+ * package specifiers: names proven external, which nothing in the tree
+ * claims (see ctx_path_aliases_claims). `render()` imported from '@testing-library/react'
  * used to land on the project's one function named `render`; the call runs
  * the package's code, which the graph does not hold.
  *
