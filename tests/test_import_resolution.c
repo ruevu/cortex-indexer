@@ -45,6 +45,155 @@ static int setup_import_repo(void) {
         return -1;
     }
     const char *const files[][2] = {
+        /* Project functions named like what packages export (T-jnpg). */
+        {"lib/render.ts", "export function render(): void {}\n"},
+        {"lib/resolve.ts", "export function resolve(): string {\n"
+                           "  return '';\n"
+                           "}\n"},
+        {"lib/dayjs.ts", "export function dayjs(): number {\n"
+                         "  return 0;\n"
+                         "}\n"},
+        {"lib/Spin.tsx", "export function Spin() {\n"
+                         "  return null;\n"
+                         "}\n"},
+        /* Callers that import those names from packages: npm, a Node builtin,
+         * a default import, and a JSX component. */
+        {"ui_tests/card.test.ts", "import { render } from '@testing-library/react';\n"
+                                  "import { resolve } from 'node:path';\n"
+                                  "import dayjs from 'dayjs';\n"
+                                  "\n"
+                                  "export function rendersCard(): void {\n"
+                                  "  render();\n"
+                                  "  resolve();\n"
+                                  "  dayjs();\n"
+                                  "}\n"},
+        {"ui_tests/loading.tsx", "import { Spin } from 'antd';\n"
+                                 "\n"
+                                 "export function Loading() {\n"
+                                 "  return <Spin />;\n"
+                                 "}\n"},
+        /* A workspace package the tree declares, imported by its name with no
+         * alias for it: its code, so the guess stays. */
+        {"packages/kit/package.json", "{ \"name\": \"@acme/kit\" }\n"},
+        {"packages/kit/src/use_kit.ts", "export function useKit(): void {}\n"},
+        {"apps/start.ts", "import { useKit } from '@acme/kit';\n"
+                          "\n"
+                          "export function startsApp(): void {\n"
+                          "  useKit();\n"
+                          "}\n"},
+        /* Aliases only a framework resolves (Nuxt's `~/`, its `#imports`),
+         * with no tsconfig to say so: no package has such a name, so the
+         * guess stays. */
+        {"composables/counter.ts", "export function useCounter(): void {}\n"},
+        {"composables/theme.ts", "export function useTheme(): void {}\n"},
+        {"pages/count.ts", "import { useCounter } from '~/composables/counter';\n"
+                           "import { useTheme } from '#imports';\n"
+                           "\n"
+                           "export function countsUp(): void {\n"
+                           "  useCounter();\n"
+                           "  useTheme();\n"
+                           "}\n"},
+        /* Aliases the loader cannot see. Vite's template keeps them in a
+         * tsconfig.app.json the project's tsconfig.json only references, and
+         * a key need not spell the path it maps to. */
+        {"web/tsconfig.json", "{ \"files\": [],\n"
+                              "  \"references\": [{ \"path\": \"./tsconfig.app.json\" }] }\n"},
+        {"web/tsconfig.app.json", "{ \"compilerOptions\": { \"paths\": {\n"
+                                  "  \"@lib/*\": [\"src/lib/*\"],\n"
+                                  "  \"@shared/*\": [\"src/common/*\"]\n"
+                                  "} } }\n"},
+        {"web/src/lib/format.ts", "export function formatDateA(): string {\n"
+                                  "  return '';\n"
+                                  "}\n"},
+        {"web/src/common/strings.ts", "export function padA(): string {\n"
+                                      "  return '';\n"
+                                      "}\n"},
+        {"web/src/app.ts", "import { formatDateA } from '@lib/format';\n"
+                           "import { padA } from '@shared/strings';\n"
+                           "\n"
+                           "export function mainA(): void {\n"
+                           "  formatDateA();\n"
+                           "  padA();\n"
+                           "}\n"},
+        /* A JS app whose aliases live in a babel or webpack config, with no
+         * tsconfig at all; each alias spells the path it points at, a file
+         * or a directory that re-exports it. */
+        {"rn/src/utils/money.js", "export function formatMoneyB() {\n"
+                                  "  return 0;\n"
+                                  "}\n"},
+        {"rn/src/utils/tax.js", "export function taxB() {\n"
+                                "  return 0;\n"
+                                "}\n"},
+        {"rn/src/utils/date/index.js", "export { formatDayB } from './format';\n"},
+        {"rn/src/utils/date/format.js", "export function formatDayB() {\n"
+                                        "  return '';\n"
+                                        "}\n"},
+        {"rn/src/screens/Home.js", "import { formatMoneyB } from '@utils/money';\n"
+                                   "import { taxB } from 'utils/tax';\n"
+                                   "import { formatDayB } from '@utils/date';\n"
+                                   "\n"
+                                   "export function homeB() {\n"
+                                   "  formatMoneyB();\n"
+                                   "  taxB();\n"
+                                   "  formatDayB();\n"
+                                   "}\n"},
+        /* One name imported from a package and from a path the tree claims
+         * but the resolver cannot follow, as a Vue file's two script blocks
+         * can. */
+        {"colors/tint.ts", "export function tintC(): string {\n"
+                           "  return '';\n"
+                           "}\n"},
+        {"pages/swatch.ts", "import { tintC } from 'chroma-js';\n"
+                            "import { tintC } from '~/colors/tint';\n"
+                            "\n"
+                            "export function swatchC(): string {\n"
+                            "  return tintC();\n"
+                            "}\n"},
+        /* What the tree takes from the registry. A package-shaped specifier
+         * is external only when a manifest depends on its package, or it
+         * names the runtime (`node:path`). */
+        {"package.json", "{ \"private\": true,\n"
+                         "  \"devDependencies\": { \"@testing-library/react\": \"^14.0.0\",\n"
+                         "    \"dayjs\": \"^1.11.0\", \"antd\": \"^5.0.0\",\n"
+                         "    \"chroma-js\": \"^2.4.2\", \"lodash\": \"^4.17.21\" } }\n"},
+        /* Bundler aliases no config declares, which spell no path the guess
+         * lands on: a webpack key cased unlike its directory, a key naming
+         * src/ itself, one segment (Jest's moduleDirectories), and a Deno
+         * import map, which keeps the extension. No manifest depends on such
+         * a package, so the guess stays. */
+        {"wp/src/utilities/utility.js", "export function utilityE() {\n"
+                                        "  return 0;\n"
+                                        "}\n"},
+        {"wp/src/utils/foo.js", "export function fooE() {\n"
+                                "  return 0;\n"
+                                "}\n"},
+        {"wp/utils/test-utils.js", "export function renderWithE() {\n"
+                                   "  return 0;\n"
+                                   "}\n"},
+        {"wp/src/main.js", "import { utilityE } from 'Utilities/utility';\n"
+                           "import { fooE } from '@app/utils/foo';\n"
+                           "import { renderWithE } from 'test-utils';\n"
+                           "\n"
+                           "export function mainE() {\n"
+                           "  utilityE();\n"
+                           "  fooE();\n"
+                           "  renderWithE();\n"
+                           "}\n"},
+        {"deno/src/utils/greet.ts", "export function greetE(): string {\n"
+                                    "  return '';\n"
+                                    "}\n"},
+        {"deno/main.ts", "import { greetE } from \"utils/greet.ts\";\n"
+                         "\n"
+                         "export function mainDenoE(): void {\n"
+                         "  greetE();\n"
+                         "}\n"},
+        /* A package subpath of two segments that spells no project path. */
+        {"lib/clone.ts", "export function cloneDeepD(): void {}\n"},
+        {"ui_tests/copy.test.ts", "import { cloneDeepD } from 'lodash/fp';\n"
+                                  "\n"
+                                  "export function copiesD(): void {\n"
+                                  "  cloneDeepD();\n"
+                                  "}\n"},
         /* The function every caller means. */
         {"util/date.ts", "export function formatDate(d: string): string {\n"
                          "  return d;\n"
@@ -831,6 +980,88 @@ static void import_resolution_teardown(void) {
     g_alias_failed = false;
 }
 
+/* A bare call to a name the file imports from a package is the package's,
+ * never a project function guessed by name: npm, a Node builtin, a default
+ * import, a JSX component (T-jnpg). */
+TEST(call_to_a_package_import_is_not_guessed_onto_the_project) {
+    BOTH_MODES(!pf_find_call(g_seq, "rendersCard", "lib.render.render"),
+               !pf_find_call(g_par, "rendersCard", "lib.render.render"));
+    BOTH_MODES(!pf_find_call(g_seq, "rendersCard", "lib.resolve.resolve"),
+               !pf_find_call(g_par, "rendersCard", "lib.resolve.resolve"));
+    BOTH_MODES(!pf_find_call(g_seq, "rendersCard", "lib.dayjs.dayjs"),
+               !pf_find_call(g_par, "rendersCard", "lib.dayjs.dayjs"));
+    BOTH_MODES(!pf_find_call(g_seq, "Loading", "lib.Spin.Spin"),
+               !pf_find_call(g_par, "Loading", "lib.Spin.Spin"));
+    PASS();
+}
+
+/* A package the tree itself declares is project code: a call into it by its
+ * package name keeps its edge, guessed or not. */
+TEST(call_to_a_workspace_package_import_is_kept) {
+    BOTH_MODES(pf_find_call(g_seq, "startsApp", "kit.src.use_kit.useKit") != NULL,
+               pf_find_call(g_par, "startsApp", "kit.src.use_kit.useKit") != NULL);
+    PASS();
+}
+
+/* `~/composables/counter` and `#imports` cannot be npm packages: the guess
+ * onto the project's own composable stays. */
+TEST(call_through_a_framework_alias_is_kept) {
+    BOTH_MODES(pf_find_call(g_seq, "countsUp", "composables.counter.useCounter") != NULL,
+               pf_find_call(g_par, "countsUp", "composables.counter.useCounter") != NULL);
+    BOTH_MODES(pf_find_call(g_seq, "countsUp", "composables.theme.useTheme") != NULL,
+               pf_find_call(g_par, "countsUp", "composables.theme.useTheme") != NULL);
+    PASS();
+}
+
+/* An alias the loader cannot see keeps its guess: one kept in a
+ * tsconfig.app.json that the project's config only references, whether or
+ * not its key spells the path; and a bundler alias that spells the path it
+ * points at, a file or a directory re-exporting it. */
+TEST(call_through_an_alias_the_loader_cannot_see_is_kept) {
+    BOTH_MODES(pf_find_call(g_seq, "mainA", "lib.format.formatDateA") != NULL,
+               pf_find_call(g_par, "mainA", "lib.format.formatDateA") != NULL);
+    BOTH_MODES(pf_find_call(g_seq, "mainA", "common.strings.padA") != NULL,
+               pf_find_call(g_par, "mainA", "common.strings.padA") != NULL);
+    BOTH_MODES(pf_find_call(g_seq, "homeB", "utils.money.formatMoneyB") != NULL,
+               pf_find_call(g_par, "homeB", "utils.money.formatMoneyB") != NULL);
+    BOTH_MODES(pf_find_call(g_seq, "homeB", "utils.tax.taxB") != NULL,
+               pf_find_call(g_par, "homeB", "utils.tax.taxB") != NULL);
+    BOTH_MODES(pf_find_call(g_seq, "homeB", "date.format.formatDayB") != NULL,
+               pf_find_call(g_par, "homeB", "date.format.formatDayB") != NULL);
+    PASS();
+}
+
+/* An alias no config declares and whose specifier spells no path keeps its
+ * guess, because nothing proves it external: no manifest in the tree depends
+ * on a package of that name. */
+TEST(call_through_an_undeclared_alias_is_kept) {
+    BOTH_MODES(pf_has_def(g_seq, "mainE"), pf_has_def(g_par, "mainE"));
+    BOTH_MODES(pf_find_call(g_seq, "mainE", "utilities.utility.utilityE") != NULL,
+               pf_find_call(g_par, "mainE", "utilities.utility.utilityE") != NULL);
+    BOTH_MODES(pf_find_call(g_seq, "mainE", "utils.foo.fooE") != NULL,
+               pf_find_call(g_par, "mainE", "utils.foo.fooE") != NULL);
+    BOTH_MODES(pf_has_call(g_seq, "mainE", "renderWithE"),
+               pf_has_call(g_par, "mainE", "renderWithE"));
+    BOTH_MODES(pf_find_call(g_seq, "mainDenoE", "utils.greet.greetE") != NULL,
+               pf_find_call(g_par, "mainDenoE", "utils.greet.greetE") != NULL);
+    PASS();
+}
+
+/* A name the file also imports from a path the tree claims is not the
+ * package's alone: the guess stays. */
+TEST(name_also_imported_from_the_tree_keeps_its_guess) {
+    BOTH_MODES(pf_find_call(g_seq, "swatchC", "colors.tint.tintC") != NULL,
+               pf_find_call(g_par, "swatchC", "colors.tint.tintC") != NULL);
+    PASS();
+}
+
+/* A package subpath that spells no project path is still the package's. */
+TEST(package_subpath_spelling_no_project_path_is_not_guessed) {
+    BOTH_MODES(!pf_find_call(g_seq, "copiesD", "lib.clone.cloneDeepD"),
+               !pf_find_call(g_par, "copiesD", "lib.clone.cloneDeepD"));
+    PASS();
+}
+
 SUITE(import_resolution) {
     RUN_TEST(bare_imported_call_resolves_through_import_map);
     RUN_TEST(member_of_imported_class_resolves_exactly);
@@ -861,5 +1092,12 @@ SUITE(import_resolution) {
     RUN_TEST(alias_through_two_extends_hops);
     RUN_TEST(child_paths_resolve_against_the_inherited_base_url);
     RUN_TEST(base_url_and_paths_relative_to_it);
+    RUN_TEST(call_to_a_package_import_is_not_guessed_onto_the_project);
+    RUN_TEST(call_to_a_workspace_package_import_is_kept);
+    RUN_TEST(call_through_a_framework_alias_is_kept);
+    RUN_TEST(call_through_an_alias_the_loader_cannot_see_is_kept);
+    RUN_TEST(call_through_an_undeclared_alias_is_kept);
+    RUN_TEST(name_also_imported_from_the_tree_keeps_its_guess);
+    RUN_TEST(package_subpath_spelling_no_project_path_is_not_guessed);
     import_resolution_teardown();
 }
