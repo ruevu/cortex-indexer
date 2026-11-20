@@ -643,8 +643,9 @@ TEST(gbuf_find_edges_by_target_type_multiple) {
  * The qn of a module is what an extension-less import specifier resolves
  * against, so the survivor is the claim TypeScript's resolution would pick: a
  * JS/TS-family module, file before directory, extensions in TypeScript's
- * order. Every other collision keeps the file_path order, so the survivor
- * never depends on arrival order or on how the files were sharded. */
+ * order. Every other collision goes by stem, then extension, then path: a
+ * total order, so the survivor never depends on arrival order or on how the
+ * files were sharded. */
 
 typedef struct {
     const char *label;
@@ -747,15 +748,96 @@ TEST(gbuf_qn_collision_symbol_follows_its_modules_extension_order) {
     PASS();
 }
 
-/* The extension order only settles a tie between two JS/TS-family files: a
- * symbol against one from another language keeps the file_path order, on
- * either side of it. */
-TEST(gbuf_qn_collision_across_languages_keeps_path_order) {
+/* Within one stem, every language's claims are ordered by extension: the
+ * JS/TS family first, in TypeScript's order, then the others by name. Claims
+ * of different stems keep the file_path order. */
+TEST(gbuf_qn_collision_within_one_stem_puts_the_js_family_first) {
     qn_claim_t py_fn = {"Function", "lib/parse.py"};
     qn_claim_t ts_fn = {"Function", "lib/parse.ts"};
-    ASSERT_EQ(qn_survivor_is(ts_fn, py_fn, py_fn), 0);
+    ASSERT_EQ(qn_survivor_is(py_fn, ts_fn, ts_fn), 0);
     qn_claim_t zig_fn = {"Function", "lib/parse.zig"};
     ASSERT_EQ(qn_survivor_is(zig_fn, ts_fn, ts_fn), 0);
+    ASSERT_EQ(qn_survivor_is(zig_fn, py_fn, py_fn), 0);
+    /* Different stems: lib.py's `parse` against lib/parse.ts's module-level
+     * name, path order as before. */
+    qn_claim_t lib_py = {"Function", "lib.py"};
+    qn_claim_t lib_ts = {"Variable", "lib/parse.ts"};
+    ASSERT_EQ(qn_survivor_is(lib_ts, lib_py, lib_py), 0);
+    PASS();
+}
+
+/* A directory has no extension, whatever its name: a Folder named chart.js
+ * is not a .js file. Against chart.py's module it is a longer stem and
+ * loses; read as a .js file, it would take the qn from Python. And a function
+ * in packages.cjs, a shorter stem than the Folder packages/chart.js, keeps
+ * the qn they share. */
+TEST(gbuf_qn_collision_folder_name_is_not_an_extension) {
+    qn_claim_t dir = {"Folder", "lib/chart.js"};
+    qn_claim_t py_mod = {"Module", "lib/chart.py"};
+    ASSERT_EQ(qn_survivor_is(dir, py_mod, py_mod), 0);
+    qn_claim_t pkg_dir = {"Folder", "packages/chart.js"};
+    qn_claim_t fn = {"Function", "packages.cjs"};
+    ASSERT_EQ(qn_survivor_is(pkg_dir, fn, fn), 0);
+    PASS();
+}
+
+/* Claim one qn with three claims, in all six orders, through the upsert path
+ * and through every split of them across two workers. Returns 0 when every
+ * run keeps `want`. A pairwise test cannot see a cycle: a < b < c < a keeps
+ * whichever claim arrives last. */
+static int qn_survivor_of_three_is(const qn_claim_t claims[3], qn_claim_t want) {
+    static const int orders[6][3] = {{0, 1, 2}, {0, 2, 1}, {1, 0, 2},
+                                     {1, 2, 0}, {2, 0, 1}, {2, 1, 0}};
+    for (int o = 0; o < 6; o++) {
+        ctx_gbuf_t *gb = ctx_gbuf_new("test", "/tmp");
+        for (int i = 0; i < 3; i++) {
+            const qn_claim_t *c = &claims[orders[o][i]];
+            ctx_gbuf_upsert_node(gb, c->label, "x", "test.q", c->file, 1, 5, "{}");
+        }
+        const ctx_gbuf_node_t *n = ctx_gbuf_find_by_qn(gb, "test.q");
+        ASSERT_NOT_NULL(n);
+        ASSERT_STR_EQ(n->file_path, want.file);
+        ctx_gbuf_free(gb);
+
+        for (int split = 1; split < 3; split++) {
+            ctx_gbuf_t *dst = ctx_gbuf_new("test", "/tmp");
+            ctx_gbuf_t *src = ctx_gbuf_new("test", "/tmp");
+            for (int i = 0; i < 3; i++) {
+                const qn_claim_t *c = &claims[orders[o][i]];
+                ctx_gbuf_upsert_node(i < split ? dst : src, c->label, "x", "test.q", c->file,
+                                     1, 5, "{}");
+            }
+            ASSERT_EQ(ctx_gbuf_merge(dst, src), 0);
+            n = ctx_gbuf_find_by_qn(dst, "test.q");
+            ASSERT_NOT_NULL(n);
+            ASSERT_STR_EQ(n->file_path, want.file);
+            ctx_gbuf_free(dst);
+            ctx_gbuf_free(src);
+        }
+    }
+    return 0;
+}
+
+/* The survivor is a property of the claims, not of their arrival: files
+ * reach workers dynamically. Each trio mixes the extension order with the
+ * path order. */
+TEST(gbuf_qn_collision_survivor_is_the_same_in_every_order) {
+    const qn_claim_t mixed[3] = {
+        {"Function", "lib/foo.ts"}, {"Function", "lib/foo.js"}, {"Function", "lib/foo.py"}};
+    ASSERT_EQ(qn_survivor_of_three_is(mixed, mixed[0]), 0);
+
+    const qn_claim_t build[3] = {
+        {"Function", "lib/foo.ts"}, {"Function", "lib/foo.cjs"}, {"Function", "lib/foo.css"}};
+    ASSERT_EQ(qn_survivor_of_three_is(build, build[0]), 0);
+
+    /* A third stem sorting between the other two's paths. */
+    const qn_claim_t between[3] = {
+        {"Function", "s/a.ts"}, {"Function", "s/a.py"}, {"Variable", "s/a.q.zig"}};
+    ASSERT_EQ(qn_survivor_of_three_is(between, between[0]), 0);
+
+    const qn_claim_t dirs[3] = {
+        {"Function", "lib/index.ts"}, {"Function", "lib.js"}, {"Folder", "lib/foo"}};
+    ASSERT_EQ(qn_survivor_of_three_is(dirs, dirs[1]), 0);
     PASS();
 }
 
@@ -1164,7 +1246,9 @@ SUITE(graph_buffer) {
     RUN_TEST(gbuf_qn_collision_module_beats_a_symbol_from_another_file);
     RUN_TEST(gbuf_qn_collision_ts_module_beats_js_module);
     RUN_TEST(gbuf_qn_collision_symbol_follows_its_modules_extension_order);
-    RUN_TEST(gbuf_qn_collision_across_languages_keeps_path_order);
+    RUN_TEST(gbuf_qn_collision_within_one_stem_puts_the_js_family_first);
+    RUN_TEST(gbuf_qn_collision_folder_name_is_not_an_extension);
+    RUN_TEST(gbuf_qn_collision_survivor_is_the_same_in_every_order);
     RUN_TEST(gbuf_qn_collision_without_a_js_module_keeps_path_order);
     RUN_TEST(gbuf_qn_collision_code_beats_a_doc_heading);
     RUN_TEST(gbuf_qn_collision_between_doc_headings_keeps_path_order);

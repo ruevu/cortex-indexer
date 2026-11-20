@@ -104,8 +104,7 @@ static const char *IGNORED_JSON_FILES[] = {
     "turbo.json",         ".stylelintrc.json", "pnpm-lock.json",
     "deno.json",          "biome.json",        "devcontainer.json",
     ".devcontainer.json", "launch.json",       "settings.json",
-    "extensions.json",    "tasks.json",        "cortex.json",
-    NULL};
+    "extensions.json",    "tasks.json",        NULL};
 
 /* ── Helper: check if string is in NULL-terminated array ─────────── */
 
@@ -339,13 +338,32 @@ static int safe_stat(const char *abs_path, struct stat *st) {
     return 0;
 }
 
+/* Cortex's own manifest: cortex.json at the repo root, or beside the .cortex/
+ * state of a nested checkout Cortex indexes on its own. A cortex.json
+ * anywhere else is the project's data: Cortex itself keeps eval baselines
+ * under that name. abs_path ends in name. */
+static bool is_cortex_manifest(const char *abs_path, const char *rel_path, const char *name) {
+    if (strcmp(name, "cortex.json") != 0) {
+        return false;
+    }
+    if (strcmp(rel_path, "cortex.json") == 0) {
+        return true;
+    }
+    char state[CTX_SZ_4K];
+    int dir_len = (int)(strlen(abs_path) - strlen(name));
+    int n = snprintf(state, sizeof(state), "%.*s.cortex", dir_len, abs_path);
+    struct stat st;
+    return n > 0 && (size_t)n < sizeof(state) && stat(state, &st) == 0 && S_ISDIR(st.st_mode);
+}
+
 /* Process a single regular file entry during directory walk. */
 static void walk_dir_process_file(const char *abs_path, const char *rel_path, const char *name,
                                   const ctx_discover_opts_t *opts, const ctx_gitignore_t *gitignore,
                                   const ctx_gitignore_t *ctxignore, const ctx_gitignore_t *local_gi,
                                   const char *local_gi_prefix, off_t size, file_list_t *out) {
     if (should_skip_file(name, rel_path, opts, gitignore, ctxignore, local_gi, local_gi_prefix,
-                         size)) {
+                         size) ||
+        is_cortex_manifest(abs_path, rel_path, name)) {
         return;
     }
     CtxLanguage lang = detect_file_language(name, abs_path);

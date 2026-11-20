@@ -327,7 +327,9 @@ TEST(discover_skips_git_dir) {
 
 /* Cortex writes `.cortex/` (its graph, staleness.json, logs) and `cortex.json`
  * into every repo it indexes. A repo whose .gitignore doesn't name them, or a
- * linked worktree, must still not see them in its own graph. */
+ * linked worktree, must still not see them in its own graph. Cortex's
+ * cortex.json sits at the root, or beside the .cortex/ of a nested checkout;
+ * a cortex.json anywhere else is the project's own data. */
 TEST(discover_skips_cortex_files) {
     char *base = th_mktempdir("ctx_disc_cortex");
     ASSERT(base != NULL);
@@ -342,6 +344,7 @@ TEST(discover_skips_cortex_files) {
     th_write_file(TH_PATH(base, ".superpowers/sdd/plan/progress.md"), "# ledger\n");
     th_write_file(TH_PATH(base, ".playwright-mcp/page.yml"), "- button: Save\n");
     th_write_file(TH_PATH(base, "src/main.go"), "package main\n");
+    th_write_file(TH_PATH(base, "evals/baselines/cortex.json"), "{\"files\":42}\n");
 
     ctx_discover_opts_t opts = {0};
     ctx_file_info_t *files = NULL;
@@ -349,8 +352,15 @@ TEST(discover_skips_cortex_files) {
 
     int rc = ctx_discover(base, &opts, &files, &count);
     ASSERT_EQ(rc, 0);
-    ASSERT_EQ(count, 1);
-    ASSERT_STR_EQ(files[0].rel_path, "src/main.go");
+    ASSERT_EQ(count, 2);
+    bool go = false;
+    bool baseline = false;
+    for (int i = 0; i < count; i++) {
+        go = go || strcmp(files[i].rel_path, "src/main.go") == 0;
+        baseline = baseline || strcmp(files[i].rel_path, "evals/baselines/cortex.json") == 0;
+    }
+    ASSERT_TRUE(go);
+    ASSERT_TRUE(baseline);
 
     ctx_discover_free(files, count);
     th_cleanup(base);

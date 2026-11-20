@@ -587,6 +587,65 @@ static int qn_claim_rank(const char *label, const char *file_path) {
     return ext >= 0 ? ext : IMPORTABLE_EXT_COUNT;
 }
 
+/* A claim's file_path split for stem_order: the stem is the path up to the
+ * extension's dot; a Folder, and a file without a dot past its first
+ * character, has none (`packages/chart.js` is a directory, `.gitignore` a
+ * name). */
+typedef struct {
+    size_t stem_len;
+    int ext_class;   /* 0 none, 1 JS/TS family, 2 any other */
+    int ext_index;   /* class 1: position in IMPORTABLE_EXTS */
+    const char *ext; /* class 2: after the dot */
+} stem_key_t;
+
+static stem_key_t stem_key(const char *label, const char *file_path) {
+    stem_key_t k = {strlen(file_path), 0, 0, ""};
+    if (label && strcmp(label, "Folder") == 0) {
+        return k;
+    }
+    const char *slash = strrchr(file_path, '/');
+    const char *base = slash ? slash + 1 : file_path;
+    const char *dot = strrchr(base, '.');
+    if (!dot || dot == base) {
+        return k;
+    }
+    k.stem_len = (size_t)(dot - file_path);
+    k.ext = dot + 1;
+    k.ext_index = importable_ext_index(file_path);
+    k.ext_class = k.ext_index >= 0 ? 1 : 2;
+    return k;
+}
+
+/* A total order on claims: by stem; then, within one stem, no extension
+ * first (a directory before the files named after it), the JS/TS family in
+ * TypeScript's order, every other extension by name; then by path. Negative
+ * when a sorts first. Between different stems this is the path order, except
+ * that a stem sorts before every longer stem it begins: foo.ts before
+ * foo-bar.ts and foo.d.ts, which "-" and "d" put first by path. */
+static int stem_order(const char *a_label, const char *a_path, const char *b_label,
+                      const char *b_path) {
+    stem_key_t a = stem_key(a_label, a_path);
+    stem_key_t b = stem_key(b_label, b_path);
+    size_t common = a.stem_len < b.stem_len ? a.stem_len : b.stem_len;
+    int c = memcmp(a_path, b_path, common);
+    if (c != 0) {
+        return c;
+    }
+    if (a.stem_len != b.stem_len) {
+        return a.stem_len < b.stem_len ? -1 : 1;
+    }
+    if (a.ext_class != b.ext_class) {
+        return a.ext_class - b.ext_class;
+    }
+    if (a.ext_class == 1 && a.ext_index != b.ext_index) {
+        return a.ext_index - b.ext_index;
+    }
+    if (a.ext_class == 2 && (c = strcmp(a.ext, b.ext)) != 0) {
+        return c;
+    }
+    return strcmp(a_path, b_path);
+}
+
 /* True when a claim (`incoming_label`, `incoming_file`) must NOT take over a
  * qualified name already held by `holder`.
  *
@@ -609,19 +668,21 @@ static int qn_claim_rank(const char *label, const char *file_path) {
  * A heading loses to every other claim. Nothing imports or calls one, so when
  * it keeps the qn every call to the function it documents lands on the docs.
  *
- * Two other claims from JS/TS-family files of different extensions also go
- * by TypeScript's extension order: same-stem files (foo.ts and foo.cjs, a
- * source and its CommonJS build; index.d.ts and index.d.cts) define the same
- * names, and a symbol belongs with the file whose module an import resolves
- * to. By path order alone, "foo.cjs" sorts first and would take foo.ts's
- * definitions and every call into them.
- *
- * Everything else falls back to a total order on file_path, which keeps the
- * survivor a property of the repository rather than of the thread schedule:
- * files reach workers dynamically, and last-write-wins once made the same tree
- * index to two different graphs. That covers collisions without a JS/TS module
- * on either side — a Go package is its directory, so a Folder beside a .go
+ * Every other claim goes by stem_order: its path without the extension, then
+ * the extension, then the path. Same-stem files define the same names (foo.ts
+ * and foo.cjs, a source and its CommonJS build; index.d.ts and index.d.cts),
+ * and a symbol belongs with the file whose module an import resolves to: by
+ * path order alone, "foo.cjs" sorts first and would take foo.ts's
+ * definitions and every call into them. A Go package is its directory, and a
+ * directory sorts before the files named after it, so a Folder beside a .go
  * file keeps its old outcome.
+ *
+ * Within a rank, the order is total, so the survivor is a property of the
+ * repository rather than of the thread schedule: files reach workers
+ * dynamically, and last-write-wins once made the same tree index to two
+ * different graphs. A rule that compares only some pairs breaks that: by
+ * extension, foo.ts beats foo.js; by path, foo.js beats foo.py, and foo.py
+ * beats foo.ts, and the claim that arrives last wins.
  *
  * Equal paths are not a collision at all: that is one file's node being
  * enriched by a later pass, and must still update in place. */
@@ -640,11 +701,7 @@ static bool qn_claim_loses(const ctx_gbuf_node_t *holder, const char *incoming_l
         return holder_rank < incoming_rank;
     }
     if (holder_rank == IMPORTABLE_EXT_COUNT) {
-        int holder_ext = importable_ext_index(holder->file_path);
-        int incoming_ext = importable_ext_index(incoming_file);
-        if (holder_ext >= 0 && incoming_ext >= 0 && holder_ext != incoming_ext) {
-            return holder_ext < incoming_ext;
-        }
+        return stem_order(holder->label, holder->file_path, incoming_label, incoming_file) < 0;
     }
     return by_path < 0;
 }
