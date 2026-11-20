@@ -10,7 +10,7 @@
  * skipped (fail-open). Missing files are silently ignored.
  *
  * Format:
- *   {"extra_extensions": {".blade.php": "php", ".mjs": "javascript"}}
+ *   {"extra_extensions": {".blade.php": "php", ".es6": "javascript"}}
  *
  * The language string matching is case-insensitive.
  */

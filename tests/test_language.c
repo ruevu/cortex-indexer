@@ -33,6 +33,24 @@ TEST(lang_ext_tsx) {
     ASSERT_EQ(ctx_language_for_extension(".tsx"), CTX_LANG_TSX);
     PASS();
 }
+/* Node's module-system variants are JavaScript and TypeScript source, and the
+ * import resolver already treats them so. */
+TEST(lang_ext_mjs) {
+    ASSERT_EQ(ctx_language_for_extension(".mjs"), CTX_LANG_JAVASCRIPT);
+    PASS();
+}
+TEST(lang_ext_cjs) {
+    ASSERT_EQ(ctx_language_for_extension(".cjs"), CTX_LANG_JAVASCRIPT);
+    PASS();
+}
+TEST(lang_ext_mts) {
+    ASSERT_EQ(ctx_language_for_extension(".mts"), CTX_LANG_TYPESCRIPT);
+    PASS();
+}
+TEST(lang_ext_cts) {
+    ASSERT_EQ(ctx_language_for_extension(".cts"), CTX_LANG_TYPESCRIPT);
+    PASS();
+}
 TEST(lang_ext_rust) {
     ASSERT_EQ(ctx_language_for_extension(".rs"), CTX_LANG_RUST);
     PASS();
@@ -606,6 +624,10 @@ SUITE(language) {
     RUN_TEST(lang_ext_jsx);
     RUN_TEST(lang_ext_typescript);
     RUN_TEST(lang_ext_tsx);
+    RUN_TEST(lang_ext_mjs);
+    RUN_TEST(lang_ext_cjs);
+    RUN_TEST(lang_ext_mts);
+    RUN_TEST(lang_ext_cts);
     RUN_TEST(lang_ext_rust);
     RUN_TEST(lang_ext_java);
     RUN_TEST(lang_ext_cpp);

@@ -40,6 +40,10 @@ static const char *ALWAYS_SKIP_DIRS[] = {
     ".ccls-cache", ".clangd", "elm-stuff", "_opam", ".cpcache", ".shadow-cljs",
     /* Deploy */
     ".vercel", ".netlify",
+    /* Cortex's own state: its graph, staleness and quality reports, logs */
+    ".cortex",
+    /* Agent tools' scratch: plan ledgers and briefs, browser page snapshots */
+    ".superpowers", ".playwright-mcp",
     /* Misc */
     ".qdrant_code_embeddings", ".tmp", "vendor", NULL};
 
@@ -61,12 +65,13 @@ static const char *ALWAYS_IGNORED_SUFFIXES[] = {
     ".sqlite", ".sqlite3", ".woff", ".woff2", ".ttf", ".eot", ".otf", NULL};
 
 static const char *FAST_IGNORED_SUFFIXES[] = {
-    ".zip", ".tar",  ".gz",       ".bz2",  ".xz",  ".rar",    ".7z",      ".jar",
-    ".war", ".ear",  ".mp3",      ".mp4",  ".avi", ".mov",    ".wav",     ".flac",
-    ".ogg", ".mkv",  ".webm",     ".pdf",  ".doc", ".docx",   ".xls",     ".xlsx",
-    ".ppt", ".pptx", ".odt",      ".ods",  ".map", ".min.js", ".min.css", ".pem",
-    ".crt", ".key",  ".cer",      ".p12",  ".pb",  ".avro",   ".parquet", ".beam",
-    ".elc", ".rlib", ".coverage", ".prof", ".out", ".patch",  ".diff",    NULL};
+    ".zip",     ".tar",     ".gz",      ".bz2",     ".xz",       ".rar",  ".7z",  ".jar",
+    ".war",     ".ear",     ".mp3",     ".mp4",     ".avi",      ".mov",  ".wav", ".flac",
+    ".ogg",     ".mkv",     ".webm",    ".pdf",     ".doc",      ".docx", ".xls", ".xlsx",
+    ".ppt",     ".pptx",    ".odt",     ".ods",     ".map",      ".pem",  ".crt", ".key",
+    ".min.js",  ".min.mjs", ".min.cjs", ".min.css", ".cer",      ".p12",  ".pb",  ".avro",
+    ".parquet", ".beam",    ".elc",     ".rlib",    ".coverage", ".prof", ".out", ".patch",
+    ".diff",    NULL};
 
 /* ── Fast-mode skip filenames ────────────────────────────────────── */
 
@@ -81,10 +86,11 @@ static const char *FAST_SKIP_FILENAMES[] = {
 
 /* ── Fast-mode substring patterns ────────────────────────────────── */
 
-static const char *FAST_PATTERNS[] = {".d.ts",      ".bundle.", ".chunk.", ".generated.",
-                                      ".pb.go",     "_pb2.py",  ".pb2.py", "_grpc.pb.go",
-                                      "_string.go", "mock_",    "_mock.",  "_test_helpers.",
-                                      ".stories.",  ".spec.",   ".test.",  NULL};
+static const char *FAST_PATTERNS[] = {
+    ".d.ts",     ".d.mts",  ".d.cts", ".bundle.",    ".chunk.",    ".generated.",
+    ".pb.go",    "_pb2.py", ".pb2.py", "_grpc.pb.go", "_string.go", "mock_",
+    "_mock.",    "_test_helpers.",    ".stories.",   ".spec.",     ".test.",
+    NULL};
 
 /* ── Ignored JSON filenames ──────────────────────────────────────── */
 
@@ -332,13 +338,32 @@ static int safe_stat(const char *abs_path, struct stat *st) {
     return 0;
 }
 
+/* Cortex's own manifest: cortex.json at the repo root, or beside the .cortex/
+ * state of a nested checkout Cortex indexes on its own. A cortex.json
+ * anywhere else is the project's data: Cortex itself keeps eval baselines
+ * under that name. abs_path ends in name. */
+static bool is_cortex_manifest(const char *abs_path, const char *rel_path, const char *name) {
+    if (strcmp(name, "cortex.json") != 0) {
+        return false;
+    }
+    if (strcmp(rel_path, "cortex.json") == 0) {
+        return true;
+    }
+    char state[CTX_SZ_4K];
+    int dir_len = (int)(strlen(abs_path) - strlen(name));
+    int n = snprintf(state, sizeof(state), "%.*s.cortex", dir_len, abs_path);
+    struct stat st;
+    return n > 0 && (size_t)n < sizeof(state) && stat(state, &st) == 0 && S_ISDIR(st.st_mode);
+}
+
 /* Process a single regular file entry during directory walk. */
 static void walk_dir_process_file(const char *abs_path, const char *rel_path, const char *name,
                                   const ctx_discover_opts_t *opts, const ctx_gitignore_t *gitignore,
                                   const ctx_gitignore_t *ctxignore, const ctx_gitignore_t *local_gi,
                                   const char *local_gi_prefix, off_t size, file_list_t *out) {
     if (should_skip_file(name, rel_path, opts, gitignore, ctxignore, local_gi, local_gi_prefix,
-                         size)) {
+                         size) ||
+        is_cortex_manifest(abs_path, rel_path, name)) {
         return;
     }
     CtxLanguage lang = detect_file_language(name, abs_path);

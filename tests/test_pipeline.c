@@ -663,6 +663,10 @@ TEST(testdetect_is_test_file) {
     ASSERT_TRUE(ctx_is_test_path("handler.test.js"));
     ASSERT_TRUE(ctx_is_test_path("handler.spec.ts"));
     ASSERT_TRUE(ctx_is_test_path("Component.test.tsx"));
+    ASSERT_TRUE(ctx_is_test_path("clock.test.mjs"));
+    ASSERT_TRUE(ctx_is_test_path("clock.spec.cjs"));
+    ASSERT_TRUE(ctx_is_test_path("clock.test.mts"));
+    ASSERT_TRUE(ctx_is_test_path("clock.spec.cts"));
     ASSERT_TRUE(ctx_is_test_path("OrderTest.java"));
     ASSERT_TRUE(ctx_is_test_path("handler_test.rs"));
     ASSERT_TRUE(ctx_is_test_path("handler_test.cpp"));
@@ -678,6 +682,8 @@ TEST(testdetect_is_test_file) {
     ASSERT_FALSE(ctx_is_test_path("handler.js"));
     ASSERT_FALSE(ctx_is_test_path("handler.ts"));
     ASSERT_FALSE(ctx_is_test_path("Component.tsx"));
+    ASSERT_FALSE(ctx_is_test_path("clock.mjs"));
+    ASSERT_FALSE(ctx_is_test_path("clock.cts"));
     ASSERT_FALSE(ctx_is_test_path("Order.java"));
     ASSERT_FALSE(ctx_is_test_path("handler.rs"));
     ASSERT_FALSE(ctx_is_test_path("handler.cpp"));

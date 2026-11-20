@@ -273,6 +273,41 @@ static int setup_import_repo(void) {
                             "export function formatsHome(): void {\n"
                             "  format();\n"
                             "}\n"},
+        /* Node's module-system variants. TypeScript's NodeNext resolution
+         * names a .mts file `.mjs` and a .cts file `.cjs` in an import. */
+        {"scripts/icons.mjs", "export function buildIcons() {}\n"},
+        {"scripts/legacy.cjs", "function syncIcons() {}\n"
+                               "module.exports = { syncIcons };\n"},
+        {"lib/clock.mts", "export function clockTick(): number {\n"
+                          "  return 1;\n"
+                          "}\n"},
+        {"lib/old.cts", "export function legacyTick(): number {\n"
+                        "  return 0;\n"
+                        "}\n"},
+        {"tools/run_all.ts", "import { buildIcons } from '../scripts/icons.mjs';\n"
+                             "import { clockTick } from '../lib/clock.mjs';\n"
+                             "import { legacyTick } from '../lib/old.cjs';\n"
+                             "\n"
+                             "export function runsAll(): void {\n"
+                             "  buildIcons();\n"
+                             "  clockTick();\n"
+                             "  legacyTick();\n"
+                             "}\n"},
+        /* A package that ships one module twice: TypeScript source and a
+         * CommonJS build beside it. `./pick` is pick.ts, and "pick.cjs"
+         * sorts first. */
+        {"dual/pick.ts", "export function pick(): number {\n"
+                         "  return 1;\n"
+                         "}\n"},
+        {"dual/pick.cjs", "function pick() {\n"
+                          "  return 2;\n"
+                          "}\n"
+                          "module.exports = { pick };\n"},
+        {"dual/use_pick.ts", "import { pick } from './pick';\n"
+                             "\n"
+                             "export function choosesPick(): number {\n"
+                             "  return pick();\n"
+                             "}\n"},
     };
     for (size_t i = 0; i < sizeof(files) / sizeof(files[0]); i++) {
         if (ir_write(files[i][0], files[i][1]) != 0) {
@@ -791,6 +826,47 @@ TEST(barrel_member_call_does_not_claim_another_owners_method) {
     PASS();
 }
 
+/* .mjs/.cjs files are JavaScript and .mts/.cts TypeScript: their definitions
+ * are in the graph. */
+TEST(module_system_variants_are_indexed) {
+    BOTH_MODES(qn_held_by(g_seq, "ir-test.scripts.icons.buildIcons", "Function",
+                          "scripts/icons.mjs"),
+               qn_held_by(g_par, "ir-test.scripts.icons.buildIcons", "Function",
+                          "scripts/icons.mjs"));
+    BOTH_MODES(qn_held_by(g_seq, "ir-test.scripts.legacy.syncIcons", "Function",
+                          "scripts/legacy.cjs"),
+               qn_held_by(g_par, "ir-test.scripts.legacy.syncIcons", "Function",
+                          "scripts/legacy.cjs"));
+    BOTH_MODES(
+        qn_held_by(g_seq, "ir-test.lib.clock.clockTick", "Function", "lib/clock.mts"),
+        qn_held_by(g_par, "ir-test.lib.clock.clockTick", "Function", "lib/clock.mts"));
+    BOTH_MODES(qn_held_by(g_seq, "ir-test.lib.old.legacyTick", "Function", "lib/old.cts"),
+               qn_held_by(g_par, "ir-test.lib.old.legacyTick", "Function", "lib/old.cts"));
+    PASS();
+}
+
+/* A call through an import of one of them resolves through the import, the
+ * way TypeScript resolves it: `./clock.mjs` names clock.mts. */
+TEST(import_of_a_module_system_variant_resolves) {
+    BOTH_MODES(pf_call_resolved_by(g_seq, "runsAll", "scripts.icons.buildIcons", "import_map"),
+               pf_call_resolved_by(g_par, "runsAll", "scripts.icons.buildIcons", "import_map"));
+    BOTH_MODES(pf_call_resolved_by(g_seq, "runsAll", "lib.clock.clockTick", "import_map"),
+               pf_call_resolved_by(g_par, "runsAll", "lib.clock.clockTick", "import_map"));
+    BOTH_MODES(pf_call_resolved_by(g_seq, "runsAll", "lib.old.legacyTick", "import_map"),
+               pf_call_resolved_by(g_par, "runsAll", "lib.old.legacyTick", "import_map"));
+    PASS();
+}
+
+/* A CommonJS build beside its TypeScript source does not take the source's
+ * definitions: `pick` stays in pick.ts, where `./pick` resolves. */
+TEST(sibling_build_does_not_take_the_sources_definitions) {
+    BOTH_MODES(qn_held_by(g_seq, "ir-test.dual.pick.pick", "Function", "dual/pick.ts"),
+               qn_held_by(g_par, "ir-test.dual.pick.pick", "Function", "dual/pick.ts"));
+    BOTH_MODES(pf_call_resolved_by(g_seq, "choosesPick", "dual.pick.pick", "import_map"),
+               pf_call_resolved_by(g_par, "choosesPick", "dual.pick.pick", "import_map"));
+    PASS();
+}
+
 /* The direct hit is for bare callees only: `client.get()` must not collapse
  * onto the imported `client` itself (upstream afcce2d4). */
 TEST(member_call_on_imported_name_is_not_the_name_itself) {
@@ -856,6 +932,9 @@ SUITE(import_resolution) {
     RUN_TEST(namespace_import_of_barrel_resolves_member_function);
     RUN_TEST(barrel_member_call_does_not_claim_another_owners_method);
     RUN_TEST(member_call_on_imported_name_is_not_the_name_itself);
+    RUN_TEST(module_system_variants_are_indexed);
+    RUN_TEST(import_of_a_module_system_variant_resolves);
+    RUN_TEST(sibling_build_does_not_take_the_sources_definitions);
     RUN_TEST(alias_from_extended_base_resolves_into_the_package);
     RUN_TEST(wildcard_alias_resolves_to_the_module);
     RUN_TEST(alias_through_two_extends_hops);

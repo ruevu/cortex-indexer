@@ -142,9 +142,11 @@ static const ext_entry_t EXT_TABLE[] = {
     /* Java */
     {".java", CTX_LANG_JAVA},
 
-    /* JavaScript */
+    /* JavaScript (.cjs/.mjs: Node's CommonJS and ES-module variants) */
+    {".cjs", CTX_LANG_JAVASCRIPT},
     {".js", CTX_LANG_JAVASCRIPT},
     {".jsx", CTX_LANG_JAVASCRIPT},
+    {".mjs", CTX_LANG_JAVASCRIPT},
 
     /* JSON */
     {".json", CTX_LANG_JSON},
@@ -238,7 +240,9 @@ static const ext_entry_t EXT_TABLE[] = {
     /* TSX */
     {".tsx", CTX_LANG_TSX},
 
-    /* TypeScript */
+    /* TypeScript (.cts/.mts: the CommonJS and ES-module variants) */
+    {".cts", CTX_LANG_TYPESCRIPT},
+    {".mts", CTX_LANG_TYPESCRIPT},
     {".ts", CTX_LANG_TYPESCRIPT},
 
     /* VimScript */

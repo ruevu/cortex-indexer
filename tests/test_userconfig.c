@@ -39,14 +39,14 @@ TEST(userconfig_project_basic) {
     char proj[512];
     snprintf(proj, sizeof(proj), "%s/.codebase-memory.json", dir);
     ASSERT_EQ(
-        write_json(proj, "{\"extra_extensions\":{\".blade.php\":\"php\",\".mjs\":\"javascript\"}}"),
+        write_json(proj, "{\"extra_extensions\":{\".blade.php\":\"php\",\".es6\":\"javascript\"}}"),
         0);
 
     ctx_userconfig_t *cfg = ctx_userconfig_load(dir);
     ASSERT_NOT_NULL(cfg);
 
     ASSERT_EQ(ctx_userconfig_lookup(cfg, ".blade.php"), CTX_LANG_PHP);
-    ASSERT_EQ(ctx_userconfig_lookup(cfg, ".mjs"), CTX_LANG_JAVASCRIPT);
+    ASSERT_EQ(ctx_userconfig_lookup(cfg, ".es6"), CTX_LANG_JAVASCRIPT);
     ASSERT_EQ(ctx_userconfig_lookup(cfg, ".go"), CTX_LANG_COUNT); /* not in user config */
 
     ctx_userconfig_free(cfg);
@@ -151,7 +151,7 @@ TEST(userconfig_unknown_lang_skipped) {
     /* "klingon" is not a valid language; ".wasm" should be silently skipped */
     ASSERT_EQ(
         write_json(proj,
-                   "{\"extra_extensions\":{\".wasm\":\"klingon\",\".mjs\":\"javascript\"}}"),
+                   "{\"extra_extensions\":{\".wasm\":\"klingon\",\".es6\":\"javascript\"}}"),
         0);
 
     ctx_userconfig_t *cfg = ctx_userconfig_load(dir);
@@ -159,8 +159,8 @@ TEST(userconfig_unknown_lang_skipped) {
 
     /* .wasm with unknown lang → not in config */
     ASSERT_EQ(ctx_userconfig_lookup(cfg, ".wasm"), CTX_LANG_COUNT);
-    /* .mjs with valid lang → present */
-    ASSERT_EQ(ctx_userconfig_lookup(cfg, ".mjs"), CTX_LANG_JAVASCRIPT);
+    /* .es6 with valid lang → present */
+    ASSERT_EQ(ctx_userconfig_lookup(cfg, ".es6"), CTX_LANG_JAVASCRIPT);
 
     ctx_userconfig_free(cfg);
     remove(proj);
