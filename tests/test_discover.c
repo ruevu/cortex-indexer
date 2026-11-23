@@ -17,6 +17,16 @@ TEST(skip_node_modules) {
     ASSERT_TRUE(ctx_should_skip_dir("node_modules", CTX_MODE_FULL));
     PASS();
 }
+/* Cortex's own state directory is never project source. */
+TEST(skip_cortex_state) {
+    ASSERT_TRUE(ctx_should_skip_dir(".cortex", CTX_MODE_FULL));
+    PASS();
+}
+TEST(skip_agent_tool_state) {
+    ASSERT_TRUE(ctx_should_skip_dir(".superpowers", CTX_MODE_FULL));
+    ASSERT_TRUE(ctx_should_skip_dir(".playwright-mcp", CTX_MODE_FULL));
+    PASS();
+}
 TEST(skip_pycache) {
     ASSERT_TRUE(ctx_should_skip_dir("__pycache__", CTX_MODE_FULL));
     PASS();
@@ -176,6 +186,11 @@ TEST(suffix_fast_pdf) {
     ASSERT_TRUE(ctx_has_ignored_suffix("manual.pdf", CTX_MODE_FAST));
     PASS();
 }
+TEST(suffix_fast_minified_module_variants) {
+    ASSERT_TRUE(ctx_has_ignored_suffix("app.min.mjs", CTX_MODE_FAST));
+    ASSERT_TRUE(ctx_has_ignored_suffix("app.min.cjs", CTX_MODE_FAST));
+    PASS();
+}
 TEST(suffix_fast_mp3) {
     ASSERT_TRUE(ctx_has_ignored_suffix("sound.mp3", CTX_MODE_FAST));
     PASS();
@@ -218,6 +233,11 @@ TEST(fn_no_skip_license_full) {
 
 TEST(pattern_dts) {
     ASSERT_TRUE(ctx_matches_fast_pattern("types.d.ts", CTX_MODE_FAST));
+    PASS();
+}
+TEST(pattern_dts_module_system_variants) {
+    ASSERT_TRUE(ctx_matches_fast_pattern("types.d.mts", CTX_MODE_FAST));
+    ASSERT_TRUE(ctx_matches_fast_pattern("types.d.cts", CTX_MODE_FAST));
     PASS();
 }
 TEST(pattern_pbgo) {
@@ -299,6 +319,81 @@ TEST(discover_skips_git_dir) {
     int rc = ctx_discover(base, &opts, &files, &count);
     ASSERT_EQ(rc, 0);
     ASSERT_EQ(count, 1);
+
+    ctx_discover_free(files, count);
+    th_cleanup(base);
+    PASS();
+}
+
+/* Cortex writes `.cortex/` (its graph, staleness.json, logs) and `cortex.json`
+ * into every repo it indexes. A repo whose .gitignore doesn't name them, or a
+ * linked worktree, must still not see them in its own graph. Cortex's
+ * cortex.json sits at the root, or beside the .cortex/ of a nested checkout;
+ * a cortex.json anywhere else is the project's own data. */
+TEST(discover_skips_cortex_files) {
+    char *base = th_mktempdir("ctx_disc_cortex");
+    ASSERT(base != NULL);
+
+    th_write_file(TH_PATH(base, ".cortex/staleness.json"), "{\"swept\":1}\n");
+    th_write_file(TH_PATH(base, ".cortex/quality.json"), "{\"verdict\":\"ok\"}\n");
+    th_write_file(TH_PATH(base, "cortex.json"), "{\"repoId\":\"x\"}\n");
+    /* A nested checkout's state, and agent tools' scratch: plan ledgers and
+     * page snapshots. A linked worktree reads no root .gitignore (T-0fy2). */
+    th_write_file(TH_PATH(base, "pkg/.cortex/staleness.json"), "{\"swept\":1}\n");
+    th_write_file(TH_PATH(base, "pkg/cortex.json"), "{\"repoId\":\"y\"}\n");
+    th_write_file(TH_PATH(base, ".superpowers/sdd/plan/progress.md"), "# ledger\n");
+    th_write_file(TH_PATH(base, ".playwright-mcp/page.yml"), "- button: Save\n");
+    th_write_file(TH_PATH(base, "src/main.go"), "package main\n");
+    th_write_file(TH_PATH(base, "evals/baselines/cortex.json"), "{\"files\":42}\n");
+
+    ctx_discover_opts_t opts = {0};
+    ctx_file_info_t *files = NULL;
+    int count = 0;
+
+    int rc = ctx_discover(base, &opts, &files, &count);
+    ASSERT_EQ(rc, 0);
+    ASSERT_EQ(count, 2);
+    bool go = false;
+    bool baseline = false;
+    for (int i = 0; i < count; i++) {
+        go = go || strcmp(files[i].rel_path, "src/main.go") == 0;
+        baseline = baseline || strcmp(files[i].rel_path, "evals/baselines/cortex.json") == 0;
+    }
+    ASSERT_TRUE(go);
+    ASSERT_TRUE(baseline);
+
+    ctx_discover_free(files, count);
+    th_cleanup(base);
+    PASS();
+}
+
+/* .mjs/.cjs are JavaScript and .mts/.cts TypeScript: all four are found. */
+TEST(discover_finds_module_system_variants) {
+    char *base = th_mktempdir("ctx_disc_modexts");
+    ASSERT(base != NULL);
+
+    th_write_file(TH_PATH(base, "scripts/build.mjs"), "export function build() {}\n");
+    th_write_file(TH_PATH(base, "scripts/sync.cjs"), "module.exports = {};\n");
+    th_write_file(TH_PATH(base, "lib/clock.mts"), "export const n = 1;\n");
+    th_write_file(TH_PATH(base, "lib/old.cts"), "export const m = 2;\n");
+
+    ctx_discover_opts_t opts = {0};
+    ctx_file_info_t *files = NULL;
+    int count = 0;
+
+    int rc = ctx_discover(base, &opts, &files, &count);
+    ASSERT_EQ(rc, 0);
+    ASSERT_EQ(count, 4);
+
+    int js = 0, ts = 0;
+    for (int i = 0; i < count; i++) {
+        if (files[i].language == CTX_LANG_JAVASCRIPT)
+            js++;
+        if (files[i].language == CTX_LANG_TYPESCRIPT)
+            ts++;
+    }
+    ASSERT_EQ(js, 2);
+    ASSERT_EQ(ts, 2);
 
     ctx_discover_free(files, count);
     th_cleanup(base);
@@ -675,6 +770,8 @@ SUITE(discover) {
     /* Directory skip — always */
     RUN_TEST(skip_git);
     RUN_TEST(skip_node_modules);
+    RUN_TEST(skip_cortex_state);
+    RUN_TEST(skip_agent_tool_state);
     RUN_TEST(skip_pycache);
     RUN_TEST(skip_venv);
     RUN_TEST(skip_dist);
@@ -718,6 +815,7 @@ SUITE(discover) {
     RUN_TEST(suffix_c);
     RUN_TEST(suffix_fast_zip);
     RUN_TEST(suffix_fast_pdf);
+    RUN_TEST(suffix_fast_minified_module_variants);
     RUN_TEST(suffix_fast_mp3);
     RUN_TEST(suffix_fast_pem);
 
@@ -731,6 +829,7 @@ SUITE(discover) {
 
     /* Fast mode patterns */
     RUN_TEST(pattern_dts);
+    RUN_TEST(pattern_dts_module_system_variants);
     RUN_TEST(pattern_pbgo);
     RUN_TEST(pattern_pb2py);
     RUN_TEST(pattern_mock);
@@ -742,6 +841,8 @@ SUITE(discover) {
     /* Integration tests (cross-platform) */
     RUN_TEST(discover_simple);
     RUN_TEST(discover_skips_git_dir);
+    RUN_TEST(discover_skips_cortex_files);
+    RUN_TEST(discover_finds_module_system_variants);
     RUN_TEST(discover_with_gitignore);
     RUN_TEST(discover_max_file_size);
     RUN_TEST(discover_null_path);

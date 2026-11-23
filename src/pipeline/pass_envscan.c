@@ -147,7 +147,8 @@ static int is_secret_file(const char *name) {
 static int is_ignored_dir(const char *name) {
     static const char *dirs[] = {
         ".git",  "node_modules", ".svn", ".hg",   "__pycache__", "vendor", ".terraform", ".cache",
-        ".idea", ".vscode",      "dist", "build", ".next",       ".nuxt",  "target",     NULL};
+        ".idea", ".vscode",      "dist", "build", ".next",       ".nuxt",  "target",     ".cortex",
+        NULL};
     for (int i = 0; dirs[i]; i++) {
         if (strcmp(name, dirs[i]) == 0) {
             return SKIP_ONE;
