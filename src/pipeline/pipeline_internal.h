@@ -79,6 +79,30 @@ void ctx_pipeline_import_map_from_result(const ctx_pipeline_ctx_t *ctx, const ch
                                          const CtxFileResult *result, const char ***out_keys,
                                          const char ***out_vals, int *out_count);
 
+/* A local name a script file imports from a specifier that names no node
+ * and that nothing in the tree claims, a package the tree depends on or the
+ * runtime's (todo T-jnpg): `render` from '@testing-library/react'. Both
+ * strings are borrowed. */
+typedef struct {
+    const char *name;
+    const char *specifier;
+} ctx_external_import_t;
+
+/* ctx_pipeline_import_map_from_result, plus the file's external imports
+ * (todo T-jnpg): in a script file, each local name imported from a specifier
+ * that names no node and that nothing in the tree claims
+ * (ctx_path_aliases_claims: proven external, a package some manifest takes
+ * from outside the tree or the runtime's) — `render` from
+ * '@testing-library/react', `resolve` from 'node:path' — with that
+ * specifier. A name with any in-tree
+ * import is not external. The strings are borrowed from result; the caller
+ * frees only the array. NULL out_externals asks for the map alone. */
+void ctx_pipeline_import_map_with_externals(const ctx_pipeline_ctx_t *ctx, const char *source_rel,
+                                            const CtxFileResult *result, const char ***out_keys,
+                                            const char ***out_vals, int *out_count,
+                                            ctx_external_import_t **out_externals,
+                                            int *out_external_count);
+
 /* Check cancellation. Returns non-zero if cancelled. */
 static inline int ctx_pipeline_check_cancel(const ctx_pipeline_ctx_t *ctx) {
     return atomic_load(ctx->cancelled) ? CTX_NOT_FOUND : 0;
@@ -376,6 +400,29 @@ void ctx_pipeline_create_route_nodes(ctx_gbuf_t *gb);
 bool ctx_registry_admits_member_call(const ctx_registry_t *r, CtxLanguage lang,
                                      const char *callee_name, const ctx_resolution_t *res,
                                      const CtxImportArray *imports);
+
+/* Whether a plain call (no `.` in the callee) may bind where the registry
+ * resolved it (todo T-jnpg). In JavaScript, TypeScript, TSX, Vue and Svelte it
+ * is refused when the strategy guessed by name alone (unique_name,
+ * suffix_match, fuzzy) and the calling file imports the callee only from
+ * package specifiers: names proven external, which nothing in the tree
+ * claims (see ctx_path_aliases_claims). `render()` imported from '@testing-library/react'
+ * used to land on the project's one function named `render`; the call runs
+ * the package's code, which the graph does not hold.
+ *
+ * externals are those names with their specifiers, from
+ * ctx_pipeline_import_map_with_externals. A name also imported from a module
+ * in the tree is not among them, and import_map / same_module resolutions are
+ * kept: they followed the import or the file itself. So is a guess onto
+ * target_file, the guessed node's file, when one of the name's specifiers
+ * spells its path (ctx_path_aliases_specifier_names_file): that is where a
+ * bundler alias the loader cannot see points.
+ *
+ * Only the plain CALLS edge is withheld, as with
+ * ctx_registry_admits_member_call. Everything else returns true. */
+bool ctx_registry_admits_bare_call(CtxLanguage lang, const char *callee_name,
+                                   const ctx_resolution_t *res, const char *target_file,
+                                   const ctx_external_import_t *externals, int external_count);
 
 /* ── Pass function prototypes ────────────────────────────────────── */
 

@@ -39,9 +39,24 @@ typedef struct ctx_path_aliases ctx_path_aliases_t;
 enum { CTX_PATH_ALIAS_MAX_TARGETS = 8, CTX_PATH_ALIAS_MAX_CANDIDATES = 9 };
 
 /* Walk repo_path for tsconfig.json / jsconfig.json files and load each one's
- * effective aliases. Directories discovery skips (.git, node_modules, ...)
- * and those the root .gitignore ignores are not walked. NULL when the repo
- * has no config with `paths` or `baseUrl`. Free with ctx_path_aliases_free. */
+ * effective aliases. The walk skips what discovery skips: the directories it
+ * always skips (.git, node_modules, ...), and those the root .gitignore
+ * ignores where discovery applies it (ctx_discover_root_gitignore).
+ *
+ * For ctx_path_aliases_claims, the same walk keeps:
+ *   - the `name` of every package.json it passes, and each dependency key
+ *     whose version points into the tree (`file:`, `link:`, `portal:`,
+ *     `workspace:`);
+ *   - every other dependency key: a package the tree takes from outside it;
+ *   - the `paths` keys of every other tsconfig*.json / jsconfig*.json, the
+ *     configs no scope reads (Vite's tsconfig.app.json, which the project's
+ *     tsconfig.json only references).
+ * The walk has no depth limit, and keeps names, not mentions: a name listed
+ * by every manifest counts once. A walk stopped by a cap (1024 configs, or a
+ * name set full of distinct names) marks the result incomplete.
+ *
+ * NULL when the walk found none of these, nor a config with `paths` or
+ * `baseUrl`. Free with ctx_path_aliases_free. */
 ctx_path_aliases_t *ctx_path_aliases_load(const char *repo_path);
 
 /* NULL-safe. */
@@ -59,5 +74,49 @@ bool ctx_path_aliases_is_script(const char *rel);
  * Returns 0 for a relative specifier, or when no config applies. */
 int ctx_path_aliases_candidates(const ctx_path_aliases_t *aliases, const char *source_rel,
                                 const char *specifier, char **out, int max);
+
+/* Whether an import specifier, seen from the file at source_rel, may name
+ * code in the tree even when no node was found for it (todo T-jnpg). False —
+ * external — only on evidence, from a script file (ctx_path_aliases_is_script):
+ *   - the runtime: a scheme (`node:path`, `bun:test`, `npm:x`, `jsr:@std/x`),
+ *     Bun's `bun`, or a Node builtin, bare or with a subpath (`fs/promises`);
+ *   - a package some manifest in the tree takes from outside it: a dependency
+ *     key with a registry range, an `npm:` alias, a git URL, `catalog:`,
+ *     matched by the specifier's package (`react` for `react/jsx-runtime`);
+ * and only when nothing in the tree claims it. The tree claims:
+ *   - a relative or absolute path (`./x`, `../x`, `/x`), from any file;
+ *   - a specifier no package can have: `~/x`, `@/x`, `#imports`, `$lib/x`,
+ *     `virtual:x` — an alias some framework or bundler resolves, often into
+ *     the tree, with no tsconfig to say so;
+ *   - a package the tree holds: a package.json `name` or a dependency key
+ *     pointing into the tree, matched whole or as the package of a subpath
+ *     (`@acme/kit/src/use` is `@acme/kit`);
+ *   - a specifier the file's `paths` match, or the `paths` of any config no
+ *     scope reads;
+ *   - a specifier whose first segment is a directory or file under the file's
+ *     baseUrl;
+ *   - any package-shaped specifier, when the walk was incomplete or the
+ *     specifier is too long to look up.
+ * Everything else is claimed too: an alias no config declares (webpack's
+ * `Utilities/`, babel's `@app/`, Jest's `test-utils`, a Deno import map) reads
+ * exactly like a package nobody depends on. A non-script file, whose calls
+ * the rule never judges, claims only paths. Permissive by construction: a
+ * wrong `true` keeps a
+ * guessed call edge, a wrong `false` would drop a real one. NULL aliases (the
+ * walk found nothing) leaves the path, shape and runtime rules. */
+bool ctx_path_aliases_claims(const ctx_path_aliases_t *aliases, const char *source_rel,
+                             const char *specifier);
+
+/* Whether a specifier spells the path of the file at file_rel (todo T-jnpg):
+ * two or more whole segments of it, with or without a leading '@', run
+ * through the path with the file's extension dropped — the file itself or a
+ * directory holding it. `@utils/money` spells rn/src/utils/money.js,
+ * `@utils/date` rn/src/utils/date/format.js; `dayjs` (one segment) spells
+ * nothing, so a wrapper named after its package is not the package.
+ *
+ * An alias a bundler resolves (babel-plugin-module-resolver, webpack's
+ * resolve.alias) is invisible to the loader, but usually spells the path it
+ * points at: a guess landing there is where the alias goes. */
+bool ctx_path_aliases_specifier_names_file(const char *specifier, const char *file_rel);
 
 #endif /* CTX_PATH_ALIAS_H */
